@@ -1,5 +1,8 @@
 # mrma
 
+<img width="749" height="260" alt="photo0" src="https://github.com/user-attachments/assets/753d9c41-74d1-4e62-af0c-e700ce824d9a" />
+
+
 **HTTP Trust Boundary Analyzer** — replay requests, mutate headers safely, and quantify response influence (**authorized testing only**).
 
 mrma helps answer: *“Does this target trust proxy/host headers or behave differently based on request metadata?”*  
