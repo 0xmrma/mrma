@@ -1,0 +1,112 @@
+Metadata-Version: 2.4
+Name: mrma
+Version: 0.2.0
+Summary: mrma - header minimizer & request replayer for authorized pentesting
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: httpx>=0.27.0
+Requires-Dist: rich>=13.7.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+Requires-Dist: ruff>=0.6; extra == "dev"
+
+# mrma
+
+Request replayer + header influence analyzer (authorized testing only).
+
+## Install (dev)
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+## Quick Start (no request file)
+
+### Baseline fingerprint:
+
+```bash
+mrma run --url https://example.com/ --follow-redirects
+```
+
+### Rank which header mutations influence the response:
+
+```bash
+mrma impact --url https://example.com/ --follow-redirects --top-deltas 10
+```
+
+### Use curated packs:
+
+```bash
+mrma pack list
+mrma impact --url https://example.com/ --follow-redirects --pack proxy --depth extended --ip-set extended --top-deltas 15 --delay 0.2
+```
+
+### Find minimal header removals that cause a change:
+
+```bash
+mrma isolate-remove --url https://example.com/ --follow-redirects --pack-file remove_headers.txt --preset dynamic --delay 0.2
+```
+
+### Security headers audit:
+
+```bash
+mrma profile security-headers --url https://example.com/ --follow-redirects
+```
+
+### Export request:
+
+```bash
+mrma export --url https://example.com/ --format curl
+mrma export --url https://example.com/ --format raw
+```
+
+## Raw request mode (exact reproduction)
+
+```bash
+mrma run -r req.txt -u https://example.com --follow-redirects
+mrma discover -r req.txt -u https://example.com --follow-redirects --print-minimal-request
+```
+
+## JSON output
+
+Most commands support --json:
+
+```bash
+mrma impact --url https://example.com/ --pack proxy --top-deltas 5 --json
+```
+
+## Config
+Global config:
+
+- `~/.config/mrma/config.toml`
+
+Local override (project):
+
+- `./mrma.toml`
+
+### Show merged config:
+
+```bash
+mrma config
+```
+
+### Example config:
+
+```toml
+[defaults]
+preset = "dynamic"
+timeout = 15.0
+min_similarity = 0.97
+max_len_delta_ratio = 0.05
+
+[impact]
+delay = 0.2
+ip_set = "basic"
+```
+
+## Notes
+
+- Use only on targets you are authorized to test.
+- Many modern sites are dynamic; prefer `preset=dynamic` and consider `run --repeat`.

@@ -1,0 +1,2 @@
+[console_scripts]
+mrma = mrma.cli:main

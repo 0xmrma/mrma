@@ -1,0 +1,108 @@
+# mrma
+
+HTTP Trust Boundary Analyzer — replay requests, mutate headers safely, and quantify response influence (**authorized testing only**).
+
+## Install (dev)
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+## Quick Start (no request file)
+
+### Baseline fingerprint:
+
+```bash
+mrma run --url https://example.com/ --follow-redirects
+```
+
+### Rank which header mutations influence the response:
+
+```bash
+mrma impact --url https://example.com/ --follow-redirects --top-deltas 10
+```
+
+### Use curated packs:
+
+```bash
+mrma pack list
+mrma impact --url https://example.com/ --follow-redirects --pack proxy --depth extended --ip-set extended --top-deltas 15 --delay 0.2
+```
+
+### Find minimal header removals that cause a change:
+
+```bash
+mrma isolate-remove --url https://example.com/ --follow-redirects --pack-file remove_headers.txt --preset dynamic --delay 0.2
+```
+
+### Security headers audit:
+
+```bash
+mrma profile security-headers --url https://example.com/ --follow-redirects
+```
+
+### Export request:
+
+```bash
+mrma export --url https://example.com/ --format curl
+mrma export --url https://example.com/ --format raw
+```
+## Why this is different
+
+mrma focuses on **trust boundary signals** and **meaningful diffs**:
+- Presets for dynamic targets (`default`, `dynamic`, `nextjs`, `api-json`)
+- Ignore rules to reduce noise (`--ignore-header`, `--ignore-body-regex`)
+- Stability measurement (`run --repeat`, preset-aware)
+- Report output (`mrma report` → JSON + Markdown)
+- Rate limiting + retries (`--rps`, `--retries`)
+
+## Raw request mode (exact reproduction)
+
+```bash
+mrma run -r req.txt -u https://example.com --follow-redirects
+mrma discover -r req.txt -u https://example.com --follow-redirects --print-minimal-request
+```
+
+## JSON output
+
+Most commands support --json:
+
+```bash
+mrma impact --url https://example.com/ --pack proxy --top-deltas 5 --json
+```
+
+## Config
+Global config:
+
+- `~/.config/mrma/config.toml`
+
+Local override (project):
+
+- `./mrma.toml`
+
+### Show merged config:
+
+```bash
+mrma config
+```
+
+### Example config:
+
+```toml
+[defaults]
+preset = "dynamic"
+timeout = 15.0
+min_similarity = 0.97
+max_len_delta_ratio = 0.05
+
+[impact]
+delay = 0.2
+ip_set = "basic"
+```
+
+## Notes
+
+- Use only on targets you are authorized to test.
+- Many modern sites are dynamic; prefer `preset=dynamic` and consider `run --repeat`.
