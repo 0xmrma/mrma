@@ -20,7 +20,9 @@ venv/
 mrma_report.json
 mrma_report.md
 impact.json
-*.json
+minimal_req.txt
+remove_headers.txt
+
 
 # OS/editor
 .DS_Store
