@@ -9,6 +9,12 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 ```
+## Install (pipx)
+
+```bash
+pipx install .
+mrma --version
+```
 
 ## Quick Start (no request file)
 
@@ -81,6 +87,8 @@ Global config:
 Local override (project):
 
 - `./mrma.toml`
+
+Tip: use `--no-config` to ignore config files for one run.
 
 ### Show merged config:
 
