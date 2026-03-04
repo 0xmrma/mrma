@@ -3,6 +3,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+from pathlib import Path
+import sys
+import platform
 from pathlib import Path
 
 from rich.console import Console
@@ -35,6 +39,54 @@ from .profiles.proxy_trust import default_proxy_trust_cases, run_proxy_trust_pro
 from .profiles.security_headers import audit_security_headers
 
 console = Console()
+
+def print_banner_once() -> None:
+    # show once per terminal (tty) session
+    try:
+        tty = os.ttyname(sys.stdout.fileno())
+        safe_tty = tty.replace("/", "_")
+    except Exception:
+        safe_tty = "unknown"
+
+    flag = Path(f"/tmp/mrma_banner{safe_tty}.flag")
+    if flag.exists():
+        return
+    try:
+        flag.write_text("1", encoding="utf-8")
+    except Exception:
+        # if /tmp not writable, fall back to per-process env
+        if os.environ.get("MRMA_BANNER_SHOWN") == "1":
+            return
+        os.environ["MRMA_BANNER_SHOWN"] = "1"
+
+    # config paths (safe, doesn’t require reading files)
+    try:
+        paths = default_config_paths()
+        local_path = str(paths.get("local"))
+        global_path = str(paths.get("global"))
+    except Exception:
+        local_path = "./mrma.toml"
+        global_path = "~/.config/mrma/config.toml"
+
+    console.print(
+        "[bold red]"
+        "███╗   ███╗██████╗ ███╗   ███╗ █████╗\n"
+        "████╗ ████║██╔══██╗████╗ ████║██╔══██╗\n"
+        "██╔████╔██║██████╔╝██╔████╔██║███████║\n"
+        "██║╚██╔╝██║██╔══██╗██║╚██╔╝██║██╔══██║\n"
+        "██║ ╚═╝ ██║██║  ██║██║ ╚═╝ ██║██║  ██║\n"
+        "╚═╝     ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝"
+        "[/bold red]"
+    )
+    console.print(
+        f"[bold]mrma[/bold] — HTTP Trust Boundary Analyzer ([bold]authorized testing only[/bold])"
+    )
+    console.print(
+        f"[dim]version={__version__}  python={platform.python_version()}  "
+        f"os={platform.system()}[/dim]"
+    )
+    console.print(f"[dim]config local={local_path}  global={global_path}[/dim]")
+    console.print("[dim]author=0xMRMA  site=https://0xmrma.com[/dim]\n")
 
 def _load_cfg_for_args(args):
     # args.no_config may not exist on some parsers; handle safely
@@ -298,10 +350,70 @@ def cmd_report(args: argparse.Namespace) -> int:
         ]
     }
 
+    # ---- Trust Boundary Score (0-100) ----
+    signals: list[str] = []
+    score_tb = 0
+
+    # Security headers contribute directly (your existing score is 0 best)
+    # Convert sec score into risk points (cap 30)
+    sec_risk = min(int(score), 30)
+    if sec_risk:
+        score_tb += sec_risk
+        signals.append(f"security-headers score={score} (risk +{sec_risk})")
+
+    # Impact: count meaningful CHANGED rows (cap 20)
+    changed_rows = [r for r in rows_sorted if not r.equivalent]
+    if changed_rows:
+        add = min(len(changed_rows) * 2, 20)
+        score_tb += add
+        signals.append(f"impact: {len(changed_rows)} mutation(s) CHANGED (risk +{add})")
+        # highlight strongest deltas
+        for r in changed_rows[:5]:
+            signals.append(f"impact changed: {r.name} sim={r.similarity:.4f} status={r.status_base}->{r.status_mut}")
+
+    # Proxy-trust profile: changed cases are strong trust signals (cap 25)
+    px_changed = [r for r in proxy_results if not r.equivalent]
+    if px_changed:
+        add = min(len(px_changed) * 8, 25)
+        score_tb += add
+        signals.append(f"proxy-trust: {len(px_changed)} case(s) CHANGED (risk +{add})")
+        for r in px_changed[:5]:
+            loc = " loc-change" if (r.location_base != r.location_case) else ""
+            signals.append(f"proxy-trust changed: {r.name} sim={r.similarity:.4f} status={r.status_base}->{r.status_case}{loc}")
+
+    # Host-routing profile: also strong signal (cap 25)
+    hr_changed = [r for r in host_results if not r.equivalent]
+    if hr_changed:
+        add = min(len(hr_changed) * 8, 25)
+        score_tb += add
+        signals.append(f"host-routing: {len(hr_changed)} case(s) CHANGED (risk +{add})")
+        for r in hr_changed[:5]:
+            loc = " loc-change" if (r.location_base != r.location_case) else ""
+            signals.append(f"host-routing changed: {r.name} sim={r.similarity:.4f} status={r.status_base}->{r.status_case}{loc}")
+
+    # Clamp final score
+    score_tb = max(0, min(score_tb, 100))
+
+    trust_boundary = {
+        "score": score_tb,
+        "summary": (
+            "Higher means more evidence the response varies with trust-boundary headers "
+            "(proxy/host routing) or meaningful diffs. Validate on authorized targets only."
+        ),
+        "signals": signals,
+        "breakdown": {
+            "security_headers_risk": sec_risk,
+            "impact_changed": len(changed_rows),
+            "proxy_trust_changed": len(px_changed),
+            "host_routing_changed": len(hr_changed),
+        },
+    }
+
     report = {
         "tool": {"name": "mrma", "version": __version__},
         "generated_at": utc_now_iso(),
         "target": {"url": args.url, "base_url": base_url, "method": req.method, "path": req.path},
+        "trust_boundary": trust_boundary,
         "baseline": baseline,
         "impact": impact,
         "security_headers": security_headers,
@@ -1458,7 +1570,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="mrma - request replayer & header analyzer (authorized testing only)",
     )
     p.add_argument("--version", action="version", version=f"mrma {__version__}")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    sub = p.add_subparsers(dest="cmd", required=False)
     cfgp = sub.add_parser("config", help="Show config paths and merged config")
     cfgp.add_argument("--json", action="store_true", help="Output JSON")
     cfgp.add_argument("--config", help="Path to a config TOML file")
@@ -1798,7 +1910,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    # banner for plain help/version calls too
+    if len(sys.argv) == 1 or (len(sys.argv) == 2 and sys.argv[1] in ("-h", "--help")):
+        print_banner_once()
+
     parser = build_parser()
     args = parser.parse_args()
+
+    if not getattr(args, "cmd", None):
+        parser.print_help()
+        raise SystemExit(0)
+
     rc = args.func(args)
     raise SystemExit(rc)

@@ -1,18 +1,26 @@
 Metadata-Version: 2.4
 Name: mrma
 Version: 0.2.0
-Summary: mrma - header minimizer & request replayer for authorized pentesting
+Summary: HTTP Trust Boundary Analyzer — replay requests, mutate headers safely, quantify response influence (authorized testing only)
+Author-email: "Mohamed Abdelaal (0xmrma)" <moabdelaal442004@gmail.com>
+Project-URL: Homepage, https://github.com/0xmrma/mrma
+Project-URL: Repository, https://github.com/0xmrma/mrma
+Project-URL: Issues, https://github.com/0xmrma/mrma/issues
+Keywords: security,http,headers,pentesting,fuzzing,analysis,cli
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
 Requires-Python: >=3.10
 Description-Content-Type: text/markdown
-Requires-Dist: httpx>=0.27.0
-Requires-Dist: rich>=13.7.0
+License-File: LICENSE
 Provides-Extra: dev
 Requires-Dist: pytest>=8.0; extra == "dev"
 Requires-Dist: ruff>=0.6; extra == "dev"
+Dynamic: license-file
 
 # mrma
 
-Request replayer + header influence analyzer (authorized testing only).
+HTTP Trust Boundary Analyzer — replay requests, mutate headers safely, and quantify response influence (**authorized testing only**).
 
 ## Install (dev)
 
@@ -20,6 +28,12 @@ Request replayer + header influence analyzer (authorized testing only).
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
+```
+## Install (pipx)
+
+```bash
+pipx install .
+mrma --version
 ```
 
 ## Quick Start (no request file)
@@ -61,6 +75,14 @@ mrma profile security-headers --url https://example.com/ --follow-redirects
 mrma export --url https://example.com/ --format curl
 mrma export --url https://example.com/ --format raw
 ```
+## Why this is different
+
+mrma focuses on **trust boundary signals** and **meaningful diffs**:
+- Presets for dynamic targets (`default`, `dynamic`, `nextjs`, `api-json`)
+- Ignore rules to reduce noise (`--ignore-header`, `--ignore-body-regex`)
+- Stability measurement (`run --repeat`, preset-aware)
+- Report output (`mrma report` → JSON + Markdown)
+- Rate limiting + retries (`--rps`, `--retries`)
 
 ## Raw request mode (exact reproduction)
 
@@ -85,6 +107,8 @@ Global config:
 Local override (project):
 
 - `./mrma.toml`
+
+Tip: use `--no-config` to ignore config files for one run.
 
 ### Show merged config:
 

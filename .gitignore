@@ -1,14 +1,28 @@
-.venv/
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
 *.pyd
+*.so
 *.egg-info/
 dist/
 build/
-.mypy_cache/
+
+# Virtualenvs
+.venv/
+venv/
+
+# Test / tooling
 .pytest_cache/
 .ruff_cache/
+
+# mrma outputs
 mrma_report.json
 mrma_report.md
 impact.json
+*.json
+
+# OS/editor
+.DS_Store
+*.swp
+*.swo

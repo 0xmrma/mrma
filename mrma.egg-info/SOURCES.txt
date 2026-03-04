@@ -1,3 +1,4 @@
+LICENSE
 README.md
 pyproject.toml
 mrma/__init__.py
@@ -34,3 +35,5 @@ mrma/core/stability.py
 mrma/profiles/host_routing.py
 mrma/profiles/proxy_trust.py
 mrma/profiles/security_headers.py
+tests/test_compare.py
+tests/test_raw_request.py
