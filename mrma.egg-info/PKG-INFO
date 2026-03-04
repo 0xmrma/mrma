@@ -3,6 +3,7 @@ Name: mrma
 Version: 0.2.0
 Summary: HTTP Trust Boundary Analyzer — replay requests, mutate headers safely, quantify response influence (authorized testing only)
 Author-email: "Mohamed Abdelaal (0xmrma)" <moabdelaal442004@gmail.com>
+License: MIT
 Project-URL: Homepage, https://github.com/0xmrma/mrma
 Project-URL: Repository, https://github.com/0xmrma/mrma
 Project-URL: Issues, https://github.com/0xmrma/mrma/issues

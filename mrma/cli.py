@@ -218,8 +218,14 @@ def cmd_report(args: argparse.Namespace) -> int:
     apply_cfg_default(args, "max_len_delta_ratio", 0.02, rep_def.get("max_len_delta_ratio"))
     apply_cfg_default(args, "delay", 0.0, rep_def.get("delay"))
     apply_cfg_default(args, "timeout", 15.0, rep_def.get("timeout"))
+    ignore_headers = tuple(args.ignore_header or [])
+    ignore_body_regex = tuple(args.ignore_body_regex or [])
 
-    console.print(f"[dim]effective preset={args.preset} min_similarity={args.min_similarity} max_len_delta_ratio={args.max_len_delta_ratio} delay={args.delay} timeout={args.timeout}[/dim]")
+    console.print(
+        f"[dim]effective preset={args.preset} min_similarity={args.min_similarity} "
+        f"max_len_delta_ratio={args.max_len_delta_ratio} delay={args.delay} timeout={args.timeout} "
+        f"ignore_headers={len(ignore_headers)} ignore_body_regex={len(ignore_body_regex)}[/dim]"
+    )
 
     opts = SendOptions(
         timeout_s=args.timeout,
@@ -251,7 +257,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 
     # Baseline
     resp = sender(req)
-    fp = fingerprint_response(resp)
+    fp = fingerprint_response(resp, ignore_headers=ignore_headers, ignore_body_regex=ignore_body_regex)
 
     baseline = {
         "status": fp.status_code,
@@ -266,6 +272,8 @@ def cmd_report(args: argparse.Namespace) -> int:
         preset=args.preset,
         max_len_delta_ratio=args.max_len_delta_ratio,
         require_same_status=True,
+        ignore_headers=ignore_headers,
+        ignore_body_regex=ignore_body_regex,
     )
     muts = default_mutations()
     rows = run_impact(req, sender, cfg, muts)
@@ -310,6 +318,8 @@ def cmd_report(args: argparse.Namespace) -> int:
         preset=args.preset,
         max_len_delta_ratio=args.max_len_delta_ratio,
         require_same_status=False,
+        ignore_headers=ignore_headers,
+        ignore_body_regex=ignore_body_regex,
     )
     proxy_cases = default_proxy_trust_cases(fake_host=args.fake_host)
     proxy_results = run_proxy_trust_profile(req, sender, cfg_profile, proxy_cases)
@@ -1904,6 +1914,18 @@ def build_parser() -> argparse.ArgumentParser:
     rep.add_argument("--rps", type=float, default=0.0, help="Requests per second (rate limit). 0 = off")
     rep.add_argument("--retries", type=int, default=0, help="Retry on transient statuses (e.g. 429/503)")
     rep.add_argument("--retry-status", default="429,502,503,504", help="Comma list of HTTP statuses to retry")
+    rep.add_argument(
+        "--ignore-header",
+        action="append",
+        default=[],
+        help="Ignore response header in comparisons (repeatable). Example: --ignore-header set-cookie",
+    )
+    rep.add_argument(
+        "--ignore-body-regex",
+        action="append",
+        default=[],
+        help="Regex to strip from body before comparison (repeatable).",
+    )
     rep.set_defaults(func=cmd_report)
 
     return p
