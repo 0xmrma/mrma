@@ -1,8 +1,6 @@
 # Python
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
 *.so
 *.egg-info/
 dist/
@@ -11,20 +9,29 @@ build/
 # Virtualenvs
 .venv/
 venv/
+.env/
 
 # Test / tooling
 .pytest_cache/
 .ruff_cache/
+.coverage
+htmlcov/
 
-# mrma outputs
-mrma_report.json
-mrma_report.md
+# Editors / OS
+.DS_Store
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# mrma outputs (generated reports / artifacts)
+mrma_report.*
 impact.json
 minimal_req.txt
 remove_headers.txt
 
-
-# OS/editor
-.DS_Store
-*.swp
-*.swo
+# Generic output patterns (handy for future commands)
+*.log
+*.tmp
+*.out
+*.bak
