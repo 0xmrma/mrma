@@ -24,6 +24,20 @@ def render_md_report(data: dict[str, Any]) -> str:
     lines.append(f"- Generated: `{data.get('generated_at','')}`")
     lines.append("")
 
+    # Trust boundary score
+    tb = data.get("trust_boundary", {})
+    if tb:
+        lines.append("## Trust boundary score")
+        lines.append("")
+        lines.append(f"- Score: `{tb.get('score')}` / 100")
+
+        score_val = int(tb.get("score", 0) or 0)
+        severity = "LOW" if score_val <= 20 else "MED" if score_val <= 50 else "HIGH"
+        lines.append(f"- Severity: `{severity}`")
+
+        lines.append(f"- Summary: {md_escape(str(tb.get('summary','')))}")
+        lines.append("")
+
     # Baseline
     base = data.get("baseline", {})
     if base:
