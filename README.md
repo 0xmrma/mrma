@@ -1,102 +1,184 @@
 # mrma
 
-HTTP Trust Boundary Analyzer — replay requests, mutate headers safely, and quantify response influence (**authorized testing only**).
+**HTTP Trust Boundary Analyzer** — replay requests, mutate headers safely, and quantify response influence (**authorized testing only**).
 
-## Install (dev)
+mrma helps answer: *“Does this target trust proxy/host headers or behave differently based on request metadata?”*  
+It focuses on **meaningful diffs** (not just status/length), plus **profiles** that model common trust-boundary behaviors.
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
-```
-## Install (pipx)
+---
+
+## Install
+
+### pipx (recommended)
 
 ```bash
 pipx install .
 mrma --version
 ```
 
-## Quick Start (no request file)
-
-### Baseline fingerprint:
+### dev / editable
 
 ```bash
-mrma run --url https://example.com/ --follow-redirects
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+mrma --version
 ```
 
-### Rank which header mutations influence the response:
+**Note**:If your system CA store is broken or you’re testing lab/self-signed certs, use --insecure.
+
+---
+
+## Quick start
+### 1) Baseline fingerprint
 
 ```bash
-mrma impact --url https://example.com/ --follow-redirects --top-deltas 10
+mrma run --url https://example.com --follow-redirects
 ```
 
-### Use curated packs:
+### 2) Find the biggest response deltas (safe mutations)
+
+```bash
+mrma impact --url https://example.com --follow-redirects --top-deltas 10
+```
+
+### 3) Compare baseline vs a single mutation (diff)
+
+```bash
+mrma diff --url https://example.com --follow-redirects --set-header "X-Test: 1"
+```
+
+### 4) Minimal required header set (delta debugging)
+
+```bash
+mrma discover --url https://example.com --follow-redirects --print-minimal-request
+```
+
+### 5) Minimal header removals that cause a change (ddmin)
+
+```bash
+mrma isolate-remove --url https://example.com --follow-redirects \
+  --pack-file remove_headers.txt --preset dynamic --delay 0.2
+```
+
+---
+
+## Why this is different
+
+Most tooling stops at: status code, length, or manual diffing.
+
+mrma adds:
+
+- **Preset-aware normalization** (`default`, `dynamic`, `nextjs`, `api-json`)
+- **Noise controls**: `--ignore-header`, `--ignore-body-regex`
+- **Stability measurement**: `run --repeat` (great for dynamic targets)
+- **Trust-boundary profiles**:
+  - `profile proxy-trust` (forwarded/proxy headers)
+  - `profile host-routing` (host-related routing headers)
+- **One-command reporting**:
+  - `mrma report` → `mrma_report.json` + `mrma_report.md`
+**Operational polish**:
+  - rate limiting + retries (`--rps`, `--retries`)
+  
+---
+
+## Curated packs
+
+List packs:
 
 ```bash
 mrma pack list
-mrma impact --url https://example.com/ --follow-redirects --pack proxy --depth extended --ip-set extended --top-deltas 15 --delay 0.2
 ```
 
-### Find minimal header removals that cause a change:
+Proxy trust pack (extended):
 
 ```bash
-mrma isolate-remove --url https://example.com/ --follow-redirects --pack-file remove_headers.txt --preset dynamic --delay 0.2
+mrma impact --url https://example.com --follow-redirects \
+  --pack proxy --depth extended --ip-set extended --top-deltas 15 --delay 0.2
 ```
 
-### Security headers audit:
-
-```bash
-mrma profile security-headers --url https://example.com/ --follow-redirects
-```
-
-### Export request:
-
-```bash
-mrma export --url https://example.com/ --format curl
-mrma export --url https://example.com/ --format raw
-```
-## Why this is different
-
-mrma focuses on **trust boundary signals** and **meaningful diffs**:
-- Presets for dynamic targets (`default`, `dynamic`, `nextjs`, `api-json`)
-- Ignore rules to reduce noise (`--ignore-header`, `--ignore-body-regex`)
-- Stability measurement (`run --repeat`, preset-aware)
-- Report output (`mrma report` → JSON + Markdown)
-- Rate limiting + retries (`--rps`, `--retries`)
+---
 
 ## Raw request mode (exact reproduction)
 
+Replay a raw HTTP request file:
+
 ```bash
 mrma run -r req.txt -u https://example.com --follow-redirects
+```
+
+Discover minimal request from a raw request:
+
+```bash
 mrma discover -r req.txt -u https://example.com --follow-redirects --print-minimal-request
 ```
 
-## JSON output
+---
 
-Most commands support --json:
+## Ignore rules (reduce noise)
+
+Ignore volatile headers:
 
 ```bash
-mrma impact --url https://example.com/ --pack proxy --top-deltas 5 --json
+mrma diff --url https://example.com --follow-redirects --set-header "X-Test: 1" \
+  --ignore-header set-cookie --ignore-header date --ignore-header etag
 ```
 
+Ignore noisy dynamic content using regex:
+
+```bash
+mrma diff --url https://example.com --follow-redirects --set-header "X-Test: 1" \
+  --ignore-body-regex '"nonce"\s*:\s*"[A-Za-z0-9\-_]+"' \
+  --ignore-body-regex '"requestId"\s*:\s*"[A-Za-z0-9\-_]+"'
+```
+
+---
+
+## Reporting
+
+Generate a compact report:
+
+```bash
+mrma report --url https://example.com --follow-redirects --top-deltas 10
+ls -la mrma_report.*
+```
+
+Terminal-friendly Markdown viewing (optional):
+
+```bash
+sudo apt update && sudo apt install -y glow
+glow -p mrma_report.md
+```
+
+---
+
+## JSON output
+
+Most commands support `--json`:
+
+```bash
+mrma impact --url https://example.com --pack proxy --top-deltas 5 --json
+```
+
+---
+
 ## Config
+
 Global config:
 
 - `~/.config/mrma/config.toml`
 
-Local override (project):
+Local (per-project):
 
 - `./mrma.toml`
 
-Tip: use `--no-config` to ignore config files for one run.
-
-### Show merged config:
+Show merged config:
 
 ```bash
-mrma config
+mrma config --json
 ```
 
-### Example config:
+Example:
 
 ```toml
 [defaults]
@@ -108,9 +190,26 @@ max_len_delta_ratio = 0.05
 [impact]
 delay = 0.2
 ip_set = "basic"
+ignore_headers = ["set-cookie", "date", "etag"]
 ```
 
-## Notes
+
+**Tip**: disable config for a single run:
+
+```bash
+mrma impact --url https://example.com --no-config
+```
+
+---
+
+## Safety / legal
 
 - Use only on targets you are authorized to test.
-- Many modern sites are dynamic; prefer `preset=dynamic` and consider `run --repeat`.
+- These mutations are designed to be low-risk by default, but responsibility is yours.
+
+---
+
+## Author
+
+- author: **0xMRMA**
+- site: https://0xmrma.com
