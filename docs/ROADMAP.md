@@ -71,6 +71,15 @@ adding more mutation families.
 - [x] Publish strict `mrma.experiment/v5` while preserving v2, v3, and v4 contracts
 - [x] Audit runtime dependencies on Python 3.10 and 3.13 independently
 
+## 0.3.7 - Media-type and transport-input precision
+
+- [x] Validate complete Content-Type parameter grammar outside quoted delimiters
+- [x] Restrict text comparison to strictly decoded UTF-8 and US-ASCII evidence
+- [x] Expose machine-readable body-comparator charset and ineligibility reasons
+- [x] Build custom TLS contexts from the exact CA bytes recorded in provenance
+- [x] Snapshot and guard opted-in environment transport inputs during client construction
+- [x] Publish strict `mrma.experiment/v6` while preserving v2 through v5 contracts
+
 ## 0.4 - Authorization-first experiment engine
 
 - Enforce an authorization policy before any network operation, including every redirect

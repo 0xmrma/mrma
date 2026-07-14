@@ -3,6 +3,29 @@
 All notable changes are documented here. MRMA follows semantic versioning for the CLI and uses an
 independent version in each machine-readable evidence schema.
 
+## Unreleased
+
+### Media-Type Precision
+
+- Content-Type eligibility now parses every parameter outside quoted delimiters, validates token
+  and quoted-string grammar, detects conflicting duplicates, and records exact ambiguity reasons.
+- Text comparison supports only strict UTF-8 and US-ASCII decoding. Unsupported charsets and bytes
+  that violate the declared charset remain digest-only and produce structured limitations.
+- Experiment evidence advances to `mrma.experiment/v6`; published v2 through v5 contracts remain
+  packaged and immutable.
+
+### Transport Input Integrity
+
+- Custom CA evidence and TLS configuration now use one immutable byte snapshot, removing the gap
+  between hashing the bundle and constructing the SSL context.
+- Opted-in proxy and TLS environment variables are snapshotted before transport construction.
+  Experiments reject environment changes that would make runtime behavior diverge from provenance.
+
+### Verification
+
+- Added adversarial media-type, charset, exact-CA-input, environment-race, v5 immutability, and v6
+  schema-invariant tests.
+
 ## 0.3.6 - 2026-07-15
 
 ### Transport Reproducibility

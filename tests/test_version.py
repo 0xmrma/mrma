@@ -46,3 +46,14 @@ def test_published_v4_schema_contract_is_immutable():
     assert hashlib.sha256(canonical).hexdigest() == (
         "9657ec9f1d1be555386878de6d07ea9d9fa12b568ff9d005c725953c93bff648"
     )
+
+
+def test_published_v5_schema_contract_is_immutable():
+    schema = json.loads(
+        Path("mrma/schemas/experiment-v5.schema.json").read_text(encoding="utf-8")
+    )
+    canonical = json.dumps(schema, sort_keys=True, separators=(",", ":")).encode()
+
+    assert hashlib.sha256(canonical).hexdigest() == (
+        "ccba85b25067a43f091797771b0fb82eee9a15c9f6c8ff30804b7fc79cb77cfa"
+    )

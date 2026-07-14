@@ -59,12 +59,12 @@ def test_cli_emits_schema_valid_evidence_and_stable_influence_exit_code():
     assert process.returncode == 10, process.stderr
     payload = json.loads(process.stdout)
     schema = json.loads(
-        files("mrma.schemas").joinpath("experiment-v5.schema.json").read_text(encoding="utf-8")
+        files("mrma.schemas").joinpath("experiment-v6.schema.json").read_text(encoding="utf-8")
     )
     Draft202012Validator.check_schema(schema)
     validator = Draft202012Validator(schema)
     validator.validate(payload)
-    assert payload["schema_version"] == "mrma.experiment/v5"
+    assert payload["schema_version"] == "mrma.experiment/v6"
     assert payload["result"]["verdict"] == "INFLUENCE_DETECTED"
     assert payload["result"]["design"]["control_observations"] == 40
     assert payload["run"]["started_at"].endswith(":00+00:00")
@@ -93,6 +93,11 @@ def test_cli_emits_schema_valid_evidence_and_stable_influence_exit_code():
     assert payload["result"]["design"]["response_header_policy"][
         "omitted_headers_possible"
     ] is True
+    assert all(
+        item["body_comparator_charset"] == "utf-8"
+        and item["body_comparator_reasons"] == []
+        for item in payload["result"]["observations"]
+    )
     assert all(
         item["code"] != "CONNECTION_REUSE" for item in payload["result"]["limitations"]
     )
@@ -185,5 +190,32 @@ def test_cli_emits_schema_valid_evidence_and_stable_influence_exit_code():
     weakened_research_environment = deepcopy(payload)
     weakened_research_environment["transport"]["trust_environment"] = True
     malformed.append(weakened_research_environment)
+
+    eligible_without_charset = deepcopy(payload)
+    eligible_without_charset["result"]["observations"][0][
+        "body_comparator_charset"
+    ] = None
+    malformed.append(eligible_without_charset)
+
+    ineligible_without_reason = deepcopy(payload)
+    ineligible_without_reason["result"]["observations"][0][
+        "body_comparator_eligible"
+    ] = False
+    ineligible_without_reason["result"]["observations"][0][
+        "body_comparator_charset"
+    ] = None
+    malformed.append(ineligible_without_reason)
+
+    unknown_body_comparator_reason = deepcopy(payload)
+    unknown_body_comparator_reason["result"]["observations"][0][
+        "body_comparator_eligible"
+    ] = False
+    unknown_body_comparator_reason["result"]["observations"][0][
+        "body_comparator_charset"
+    ] = None
+    unknown_body_comparator_reason["result"]["observations"][0][
+        "body_comparator_reasons"
+    ] = ["unknown-reason"]
+    malformed.append(unknown_body_comparator_reason)
 
     assert all(not validator.is_valid(document) for document in malformed)

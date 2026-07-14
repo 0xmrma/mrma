@@ -4,7 +4,11 @@ import hashlib
 import httpx
 import pytest
 
-from mrma.core.http_client import SemanticHttpTransport, SendOptions
+from mrma.core.http_client import (
+    SemanticHttpTransport,
+    SendOptions,
+    ssl_context_from_ca_bytes,
+)
 from mrma.core.raw_request import RawRequest
 
 
@@ -50,9 +54,7 @@ def test_client_transport_inputs_are_explicit_and_environment_trust_defaults_off
     assert captured["verify"] is True
 
 
-def test_custom_ca_uses_an_explicit_ssl_context_and_rejects_disabled_verification(
-    monkeypatch,
-):
+def test_prepared_ca_context_is_used_and_rejects_disabled_verification(monkeypatch):
     captured: dict[str, object] = {}
     marker = object()
 
@@ -61,19 +63,65 @@ def test_custom_ca_uses_an_explicit_ssl_context_and_rejects_disabled_verificatio
             return None
 
     monkeypatch.setattr(
-        "mrma.core.http_client.ssl.create_default_context",
-        lambda *, cafile: marker if cafile == "approved.pem" else None,
-    )
-    monkeypatch.setattr(
         "mrma.core.http_client.httpx.Client",
         lambda **kwargs: captured.update(kwargs) or DummyClient(),
     )
 
-    SemanticHttpTransport(SendOptions(trust_env=False, ca_bundle="approved.pem"))._new_client()
+    SemanticHttpTransport(
+        SendOptions(trust_env=False, ssl_context=marker)
+    )._new_client()
 
     assert captured["verify"] is marker
     with pytest.raises(ValueError, match="cannot be combined"):
-        SendOptions(trust_env=False, verify_tls=False, ca_bundle="approved.pem")
+        SendOptions(trust_env=False, verify_tls=False, ssl_context=marker)
+
+
+def test_ca_context_uses_exact_pem_or_der_bytes(monkeypatch):
+    captured: list[str | bytes] = []
+    marker = object()
+    monkeypatch.setattr(
+        "mrma.core.http_client.ssl.create_default_context",
+        lambda *, cadata: captured.append(cadata) or marker,
+    )
+
+    pem = b"-----BEGIN CERTIFICATE-----\nYWJj\n-----END CERTIFICATE-----\n"
+    der = b"\x30\x82\x00\x01"
+
+    assert ssl_context_from_ca_bytes(pem) is marker
+    assert ssl_context_from_ca_bytes(der) is marker
+    assert captured == [pem.decode("ascii"), der]
+
+
+def test_non_ascii_pem_bundle_is_rejected_before_ssl_construction():
+    with pytest.raises(ValueError, match="ASCII"):
+        ssl_context_from_ca_bytes(
+            b"-----BEGIN CERTIFICATE-----\n\xff\n-----END CERTIFICATE-----\n"
+        )
+
+
+def test_environment_change_during_client_construction_is_rejected(monkeypatch):
+    closed: list[bool] = []
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+
+    class DummyClient:
+        def close(self):
+            closed.append(True)
+
+    def mutate_environment(**_kwargs):
+        monkeypatch.setenv("HTTPS_PROXY", "http://changed.test")
+        return DummyClient()
+
+    monkeypatch.setattr("mrma.core.http_client.httpx.Client", mutate_environment)
+    transport = SemanticHttpTransport(
+        SendOptions(
+            trust_env=True,
+            environment_snapshot=(("HTTPS_PROXY", None),),
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="HTTPS_PROXY"):
+        transport._new_client()
+    assert closed == [True]
 
 
 def test_isolated_mode_prevents_cookie_carryover_and_preserves_explicit_cookie(monkeypatch):

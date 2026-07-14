@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import ssl
 import sys
 import time
 from pathlib import Path
@@ -21,7 +22,12 @@ from .core.experiment import ExperimentConfig, operating_characteristics, run_ex
 from .core.export import to_curl, to_raw
 from .core.fingerprint import fingerprint_response
 from .core.header_sets import common_headers
-from .core.http_client import SemanticHttpTransport, SendOptions, send_raw_request
+from .core.http_client import (
+    SemanticHttpTransport,
+    SendOptions,
+    send_raw_request,
+    ssl_context_from_ca_bytes,
+)
 from .core.impact import run_impact
 from .core.isolate import isolate_added_headers
 from .core.isolate_remove import isolate_removed_headers
@@ -190,39 +196,54 @@ def _apply_assurance_preset(args: argparse.Namespace) -> str:
     return preset
 
 
-def _configured_environment(names: tuple[str, ...]) -> dict[str, str]:
-    return {name: os.environ[name] for name in names if os.environ.get(name)}
+def _environment_snapshot(names: tuple[str, ...]) -> tuple[tuple[str, str | None], ...]:
+    return tuple((name, os.environ.get(name)) for name in names)
 
 
-def _file_sha256(path: str) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return f"sha256:{digest.hexdigest()}"
+def _present_environment(
+    snapshot: tuple[tuple[str, str | None], ...],
+    names: tuple[str, ...],
+) -> dict[str, str]:
+    selected = set(names)
+    return {name: value for name, value in snapshot if name in selected and value}
 
 
-def _transport_provenance(
+def _transport_configuration(
     args: argparse.Namespace,
     redactor: EvidenceRedactor,
-) -> tuple[str, str, dict[str, object]]:
+) -> tuple[
+    str,
+    str,
+    dict[str, object],
+    ssl.SSLContext | None,
+    tuple[tuple[str, str | None], ...] | None,
+]:
+    environment_names = tuple(
+        dict.fromkeys((*_PROXY_ENVIRONMENT_VARIABLES, *_TLS_ENVIRONMENT_VARIABLES))
+    )
+    environment_snapshot = (
+        _environment_snapshot(environment_names) if args.trust_environment else None
+    )
     proxy_environment = (
-        _configured_environment(_PROXY_ENVIRONMENT_VARIABLES)
-        if args.trust_environment
+        _present_environment(environment_snapshot, _PROXY_ENVIRONMENT_VARIABLES)
+        if environment_snapshot is not None
         else {}
     )
     tls_environment = (
-        _configured_environment(_TLS_ENVIRONMENT_VARIABLES)
-        if args.trust_environment
+        _present_environment(environment_snapshot, _TLS_ENVIRONMENT_VARIABLES)
+        if environment_snapshot is not None
         else {}
     )
+    ssl_context: ssl.SSLContext | None = None
 
     if args.insecure:
         tls_verification = "disabled"
         ca_fingerprint = None
     elif args.ca_bundle:
+        ca_bytes = Path(args.ca_bundle).read_bytes()
         tls_verification = "custom-ca"
-        ca_fingerprint = _file_sha256(args.ca_bundle)
+        ca_fingerprint = f"sha256:{hashlib.sha256(ca_bytes).hexdigest()}"
+        ssl_context = ssl_context_from_ca_bytes(ca_bytes)
     elif tls_environment:
         tls_verification = "environment"
         ca_fingerprint = redactor.fingerprint(
@@ -249,18 +270,24 @@ def _transport_provenance(
         proxy_source = "none"
         endpoint_fingerprint = None
 
-    return tls_verification, proxy_mode, {
-        "trust_environment": args.trust_environment,
-        "tls": {
-            "verification": tls_verification,
-            "ca_fingerprint": ca_fingerprint,
+    return (
+        tls_verification,
+        proxy_mode,
+        {
+            "trust_environment": args.trust_environment,
+            "tls": {
+                "verification": tls_verification,
+                "ca_fingerprint": ca_fingerprint,
+            },
+            "proxy": {
+                "mode": proxy_mode,
+                "source": proxy_source,
+                "endpoint_fingerprint": endpoint_fingerprint,
+            },
         },
-        "proxy": {
-            "mode": proxy_mode,
-            "source": proxy_source,
-            "endpoint_fingerprint": endpoint_fingerprint,
-        },
-    }
+        ssl_context,
+        environment_snapshot,
+    )
 
 def _apply_add_common(req, add_common: bool):
     if not add_common:
@@ -768,11 +795,15 @@ def cmd_experiment(args: argparse.Namespace) -> int:
         raise SystemExit(f"Error: {exc}") from exc
     redactor = EvidenceRedactor(policy=args.redaction_policy)
     try:
-        tls_verification, proxy_mode, transport_provenance = _transport_provenance(
-            args, redactor
-        )
-    except OSError as exc:
-        raise SystemExit(f"Error: unable to read --ca-bundle: {exc}") from exc
+        (
+            tls_verification,
+            proxy_mode,
+            transport_provenance,
+            ssl_context,
+            environment_snapshot,
+        ) = _transport_configuration(args, redactor)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"Error: unable to prepare --ca-bundle: {exc}") from exc
     if not args.json and args.redaction_policy == "forensic":
         console.print(
             "[warning]Forensic evidence preserves clear target paths and exact size/timing metadata.[/warning]"
@@ -810,7 +841,8 @@ def cmd_experiment(args: argparse.Namespace) -> int:
         verify_tls=(not args.insecure),
         trust_env=args.trust_environment,
         proxy=args.proxy,
-        ca_bundle=args.ca_bundle,
+        ssl_context=ssl_context,
+        environment_snapshot=environment_snapshot,
     )
     retry_values = [value.strip() for value in args.retry_status.split(",") if value.strip()]
     if any(not value.isdigit() for value in retry_values):
@@ -903,7 +935,7 @@ def cmd_experiment(args: argparse.Namespace) -> int:
     target_metadata = _redacted_target_metadata(base_url, baseline, redactor)
     result_payload = result.to_dict()
     payload = {
-        "schema_version": "mrma.experiment/v5",
+        "schema_version": "mrma.experiment/v6",
         "run": {
             "id": run_id,
             "started_at": redactor.run_timestamp(started_at),

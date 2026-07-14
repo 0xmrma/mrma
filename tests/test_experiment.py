@@ -794,6 +794,94 @@ def test_ambiguous_content_type_is_not_used_as_text_evidence():
     }
 
 
+@pytest.mark.parametrize(
+    ("content_type", "reason"),
+    [
+        ("text/plain; charset=utf 8", "invalid-parameter-value"),
+        ("text/plain; charset", "missing-parameter-value"),
+        ("text/plain; =utf-8", "invalid-parameter-name"),
+        (
+            "text/plain; charset=utf-8; charset=us-ascii",
+            "conflicting-duplicate-parameter",
+        ),
+        ("text/plain; charset=iso-8859-1", "unsupported-charset"),
+    ],
+)
+def test_invalid_content_type_parameters_are_digest_only_with_precise_reasons(
+    content_type,
+    reason,
+):
+    baseline, mutated = mutation_pair()
+
+    result = run_experiment(
+        baseline,
+        mutated,
+        lambda arm, _req: FakeResponse(
+            b"mutation" if arm == "mutation" else b"control",
+            {"content-type": content_type},
+        ),
+        ExperimentConfig(max_rounds=20, seed=22),
+    )
+    exported = result.to_dict()
+    limitation = next(
+        item for item in exported["limitations"] if item["code"] == "AMBIGUOUS_CONTENT_TYPE"
+    )
+
+    assert result.verdict == "INCONCLUSIVE"
+    assert all(not item.body_comparator_eligible for item in result.observations)
+    assert all(reason in item.body_comparator_reasons for item in result.observations)
+    assert reason in limitation["message"]
+
+
+def test_declared_charset_must_decode_every_retained_body_strictly():
+    baseline, mutated = mutation_pair()
+
+    result = run_experiment(
+        baseline,
+        mutated,
+        lambda arm, _req: FakeResponse(
+            b"\xffmutation" if arm == "mutation" else b"\xffcontrol",
+            {"content-type": "text/plain; charset=us-ascii"},
+        ),
+        ExperimentConfig(max_rounds=20, seed=23),
+    )
+    exported = result.to_dict()
+
+    assert result.verdict == "INCONCLUSIVE"
+    assert all(
+        item.body_comparator_reasons == ("invalid-body-encoding",)
+        for item in result.observations
+    )
+    assert "INVALID_DECLARED_BODY_ENCODING" in {
+        item["code"] for item in exported["limitations"]
+    }
+
+
+@pytest.mark.parametrize(
+    ("content_type", "body"),
+    [
+        ("text/plain; charset=utf-8", "caf\u00e9".encode()),
+        ("text/plain; charset=us-ascii", b"plain-ascii"),
+    ],
+)
+def test_supported_declared_charsets_enable_strict_text_comparison(content_type, body):
+    baseline, mutated = mutation_pair()
+
+    result = run_experiment(
+        baseline,
+        mutated,
+        lambda arm, _req: FakeResponse(
+            body + (b"-mutation" if arm == "mutation" else b"-control"),
+            {"content-type": content_type},
+        ),
+        ExperimentConfig(max_rounds=20, seed=24),
+    )
+
+    assert result.verdict == "INFLUENCE_DETECTED"
+    assert all(item.body_comparator_eligible for item in result.observations)
+    assert all(item.body_comparator_reasons == () for item in result.observations)
+
+
 def test_exact_custom_response_header_can_be_made_decision_bearing():
     baseline, mutated = mutation_pair()
 

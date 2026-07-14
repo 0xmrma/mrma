@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -26,8 +27,10 @@ class _CacheControlAnalysis:
 
 
 @dataclass(frozen=True)
-class _ContentTypeAnalysis:
+class ContentTypeAnalysis:
     media_type: str | None
+    parameters: tuple[tuple[str, str], ...] = ()
+    charset: str | None = None
     ambiguities: tuple[str, ...] = ()
 
 
@@ -132,6 +135,41 @@ def _split_quoted_commas(values: Iterable[str]) -> tuple[list[str], bool]:
     return [field for field in fields if field], well_formed
 
 
+def _split_quoted(value: str, delimiter: str) -> tuple[list[str], bool]:
+    parts: list[str] = []
+    start = 0
+    quoted = False
+    escaped = False
+    well_formed = True
+    for index, character in enumerate(value):
+        if escaped:
+            codepoint = ord(character)
+            if not (
+                character in {"\t", " "}
+                or 0x21 <= codepoint <= 0x7E
+                or 0x80 <= codepoint <= 0xFF
+            ):
+                well_formed = False
+            escaped = False
+        elif character == "\\" and quoted:
+            escaped = True
+        elif character == '"':
+            quoted = not quoted
+        elif character == delimiter and not quoted:
+            parts.append(value[start:index])
+            start = index + 1
+        elif quoted and not (
+            character in {"\t", " "}
+            or character == "!"
+            or 0x23 <= ord(character) <= 0x5B
+            or 0x5D <= ord(character) <= 0x7E
+            or 0x80 <= ord(character) <= 0xFF
+        ):
+            well_formed = False
+    parts.append(value[start:])
+    return parts, well_formed and not quoted and not escaped
+
+
 def _unquote(value: str) -> str:
     if len(value) < 2 or not (value.startswith('"') and value.endswith('"')):
         return value
@@ -188,19 +226,91 @@ def _cache_control(values: tuple[str, ...]) -> _CacheControlAnalysis:
     return _CacheControlAnalysis(canonical)
 
 
-def _content_type(values: tuple[str, ...]) -> _ContentTypeAnalysis:
+def _content_type(values: tuple[str, ...]) -> ContentTypeAnalysis:
     if not values:
-        return _ContentTypeAnalysis(None)
-    fields, well_formed = _split_quoted_commas(values)
-    if not well_formed or not fields:
-        return _ContentTypeAnalysis(None, ("malformed-syntax",))
+        return ContentTypeAnalysis(None)
+
+    fields: list[str] = []
+    well_formed = True
+    for value in values:
+        split, valid = _split_quoted(value, ",")
+        fields.extend(part.strip(" \t") for part in split)
+        well_formed = well_formed and valid
+    if not well_formed:
+        return ContentTypeAnalysis(None, ambiguities=("malformed-quoted-string",))
     if len(fields) != 1:
-        return _ContentTypeAnalysis(None, ("multiple-values",))
-    media_type = fields[0].split(";", 1)[0].strip().lower()
+        return ContentTypeAnalysis(None, ambiguities=("multiple-values",))
+
+    segments, well_formed = _split_quoted(fields[0], ";")
+    if not well_formed:
+        return ContentTypeAnalysis(None, ambiguities=("malformed-quoted-string",))
+    media_type = segments[0].strip(" \t").lower()
     parts = media_type.split("/")
     if len(parts) != 2 or any(_TOKEN.fullmatch(part) is None for part in parts):
-        return _ContentTypeAnalysis(None, ("malformed-syntax",))
-    return _ContentTypeAnalysis(media_type)
+        return ContentTypeAnalysis(None, ambiguities=("malformed-media-type",))
+
+    parsed: list[tuple[str, str]] = []
+    ambiguities: list[str] = []
+    by_name: dict[str, str] = {}
+    charset: str | None = None
+    for raw_parameter in segments[1:]:
+        parameter = raw_parameter.strip(" \t")
+        name, separator, raw_value = parameter.partition("=")
+        lowered_name = name.lower()
+        if not separator or not raw_value:
+            ambiguities.append("missing-parameter-value")
+            continue
+        if _TOKEN.fullmatch(name) is None:
+            ambiguities.append("invalid-parameter-name")
+            continue
+
+        if raw_value.startswith('"'):
+            value = _unquote(raw_value)
+            if not raw_value.endswith('"') or len(raw_value) < 2:
+                ambiguities.append("malformed-quoted-string")
+                continue
+        elif _TOKEN.fullmatch(raw_value) is not None:
+            value = raw_value
+        else:
+            ambiguities.append("invalid-parameter-value")
+            continue
+
+        comparison_value = value
+        parsed_charset: str | None = None
+        if lowered_name == "charset":
+            try:
+                codec = codecs.lookup(value).name
+            except LookupError:
+                comparison_value = value.lower()
+                ambiguities.append("unsupported-charset")
+            else:
+                comparison_value = codec
+                if codec == "utf-8":
+                    parsed_charset = "utf-8"
+                elif codec == "ascii":
+                    parsed_charset = "us-ascii"
+                else:
+                    ambiguities.append("unsupported-charset")
+        if lowered_name in by_name and by_name[lowered_name] != comparison_value:
+            ambiguities.append("conflicting-duplicate-parameter")
+            continue
+        by_name[lowered_name] = comparison_value
+        if parsed_charset is not None:
+            charset = parsed_charset
+        parsed.append((lowered_name, value))
+
+    unique_ambiguities = tuple(dict.fromkeys(ambiguities))
+    return ContentTypeAnalysis(
+        media_type if not unique_ambiguities else None,
+        parameters=tuple(parsed),
+        charset=charset,
+        ambiguities=unique_ambiguities,
+    )
+
+
+def content_type_analysis(values: tuple[str, ...]) -> ContentTypeAnalysis:
+    """Parse one Content-Type declaration under conservative HTTP field semantics."""
+    return _content_type(values)
 
 
 def content_type_media_type(values: tuple[str, ...]) -> str | None:
