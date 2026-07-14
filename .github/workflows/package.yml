@@ -4,16 +4,12 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Container version tag, for example 0.3.3"
-        required: true
-        type: string
 
 permissions:
   contents: read
   packages: write
+  id-token: write
+  attestations: write
 
 concurrency:
   group: package-${{ github.ref }}
@@ -25,14 +21,25 @@ env:
 
 jobs:
   publish:
+    environment: release
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Verify signed annotated release tag
+        shell: bash
+        run: |
+          test "$(git cat-file -t "$GITHUB_REF_NAME")" = tag
+          git config gpg.format ssh
+          git config gpg.ssh.allowedSignersFile "$GITHUB_WORKSPACE/.github/release-signers"
+          git verify-tag "$GITHUB_REF_NAME"
 
       - name: Verify image tag matches package version
         env:
-          EXPECTED_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          EXPECTED_VERSION: ${{ github.ref_name }}
         run: python -c "import os; from mrma import __version__; expected=os.environ['EXPECTED_VERSION'].removeprefix('v'); assert __version__ == expected, f'{__version__} != {expected}'"
 
       - name: Set up QEMU
@@ -56,7 +63,6 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=${{ inputs.version }},enable=${{ github.event_name == 'workflow_dispatch' }}
             type=sha,prefix=sha-
 
       - name: Build and publish image
@@ -73,3 +79,10 @@ jobs:
           sbom: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Attest published image provenance
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true

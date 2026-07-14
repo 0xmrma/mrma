@@ -7,7 +7,7 @@ across a layered HTTP system, then helps reduce that signal to the smallest resp
 It is not a generic vulnerability scanner and it does not treat a one-off response difference as
 a finding.
 
-> Status: `0.3.3` research preview. `mrma experiment` has a conservative evidence contract;
+> Status: `0.3.4` research preview. `mrma experiment` has a conservative evidence contract;
 > legacy survey and minimization commands do not yet share this oracle.
 
 ## The flagship workflow
@@ -96,8 +96,10 @@ Redirect comparison resolves and canonicalizes targets before classification. Re
 absolute forms, default ports, host casing, dot segments, and percent-encoded unreserved
 characters do not create false signals. Raw `Location` formatting is retained only as a keyed
 fingerprint. Response fields use explicit semantics for `Vary`, `Allow`, CORS token sets,
-`Cache-Control`, `Location`, and `Content-Location`; captured fields without a registry rule and
-`Set-Cookie` remain conservative ordered evidence.
+`Cache-Control`, `Location`, and `Content-Location`. HTTP method tokens remain case-sensitive even
+when their list order is irrelevant. Duplicate directives or malformed `Cache-Control` syntax
+preserve ordered evidence and emit `AMBIGUOUS_CACHE_CONTROL`; captured fields without a registry
+rule and `Set-Cookie` remain conservative ordered evidence.
 
 Connection scope is explicit: `reuse` (default), `per-arm`, `per-round`, or `fresh-observation`.
 Cookie state remains a separate policy. Wilson intervals assume repeated observations are suitably
@@ -120,14 +122,14 @@ MRMA is published as a non-root multi-architecture container through GitHub Cont
 the Python base is pinned by OCI digest and build/runtime dependencies are exact and hash-verified.
 
 ```bash
-docker pull ghcr.io/0xmrma/mrma:0.3.3
-docker run --rm ghcr.io/0xmrma/mrma:0.3.3 --version
+docker pull ghcr.io/0xmrma/mrma:0.3.4
+docker run --rm ghcr.io/0xmrma/mrma:0.3.4 --version
 ```
 
 Run an authorized experiment from the container:
 
 ```bash
-docker run --rm ghcr.io/0xmrma/mrma:0.3.3 \
+docker run --rm ghcr.io/0xmrma/mrma:0.3.4 \
   experiment --url https://example.com --set-header "X-Test: 1"
 ```
 
@@ -216,11 +218,20 @@ Influence Graph, stability-aware minimization, protocol transports, and enterpri
 
 ## Safety
 
+- MRMA 0.3.x does not enforce authorization manifests or centralized request budgets.
 - Test only targets for which you have explicit authorization.
 - Start with low request rates and a small mutation set.
 - Do not treat influence as exploitability or severity.
 - Review requests that can alter state before replaying them.
 - Preserve the evidence, configuration, and transport label when reporting a result.
+
+## Release verification
+
+Publishing requires a signed annotated tag and approval through the protected `release`
+environment. Python distributions and the container have GitHub-signed provenance; the image also
+contains BuildKit provenance and SBOM manifests. Follow the
+[release verification procedure](docs/RELEASE_SECURITY.md) and pin operational deployments to the
+reported OCI digest rather than only a mutable version tag.
 
 ## Author
 

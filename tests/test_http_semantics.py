@@ -1,6 +1,12 @@
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
-from mrma.core.http_semantics import canonical_header_values, canonical_uri
+from mrma.core.http_semantics import (
+    canonical_header_values,
+    canonical_uri,
+    header_semantic_ambiguities,
+)
 
 
 def test_equivalent_redirect_references_have_one_canonical_target():
@@ -40,8 +46,17 @@ def test_invalid_uri_port_is_preserved_conservatively():
 
 
 def test_field_registry_handles_token_sets_cache_directives_and_uri_references():
-    assert canonical_header_values("allow", ("GET, post",)) == canonical_header_values(
-        "allow", ("POST", "get")
+    assert canonical_header_values("allow", ("GET, POST",)) == canonical_header_values(
+        "allow", ("POST", "GET")
+    )
+    assert canonical_header_values("allow", ("GET",)) != canonical_header_values(
+        "allow", ("get",)
+    )
+    assert canonical_header_values(
+        "access-control-allow-methods", ("PATCH",)
+    ) != canonical_header_values("access-control-allow-methods", ("patch",))
+    assert canonical_header_values("vary", ("Accept-Encoding",)) == canonical_header_values(
+        "vary", ("accept-encoding",)
     )
     assert canonical_header_values(
         "cache-control", ('no-cache, private="Set-Cookie, Authorization"',)
@@ -61,6 +76,54 @@ def test_cache_control_parser_preserves_escaped_commas_inside_quoted_values():
 
     assert canonical_header_values("cache-control", combined) == canonical_header_values(
         "cache-control", split
+    )
+
+
+def test_ambiguous_cache_control_preserves_duplicate_order_and_malformed_fields():
+    first = ("max-age=0, max-age=3600",)
+    reversed_order = ("max-age=3600, max-age=0",)
+    malformed = ('private="Set-Cookie',)
+
+    assert canonical_header_values("cache-control", first) != canonical_header_values(
+        "cache-control", reversed_order
+    )
+    assert header_semantic_ambiguities("cache-control", first) == ("duplicate-directive",)
+    assert header_semantic_ambiguities("cache-control", malformed) == ("malformed-syntax",)
+
+
+@given(
+    st.lists(
+        st.sampled_from(["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]),
+        min_size=1,
+        max_size=6,
+        unique=True,
+    )
+)
+def test_method_set_order_is_irrelevant_but_token_case_is_not(methods):
+    forward = (", ".join(methods),)
+    reverse = tuple(reversed(methods))
+
+    assert canonical_header_values("allow", forward) == canonical_header_values(
+        "allow", reverse
+    )
+    assert canonical_header_values("allow", (methods[0],)) != canonical_header_values(
+        "allow", (methods[0].lower(),)
+    )
+
+
+@given(
+    st.sampled_from(["max-age", "s-maxage", "stale-while-revalidate"]),
+    st.integers(min_value=0, max_value=86_400),
+    st.integers(min_value=0, max_value=86_400),
+)
+def test_duplicate_cache_directive_order_remains_decision_bearing(name, first, second):
+    if first == second:
+        return
+    left = (f"{name}={first}, {name}={second}",)
+    right = (f"{name}={second}, {name}={first}",)
+
+    assert canonical_header_values("cache-control", left) != canonical_header_values(
+        "cache-control", right
     )
 
 

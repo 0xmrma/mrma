@@ -45,15 +45,36 @@ adding more mutation families.
 - [x] Durable atomic experiment-evidence writes where directory sync is supported
 - [x] Strict `mrma.experiment/v4` with immutable v2 and v3 compatibility contracts
 
-## 0.4 - One experiment oracle
+## 0.3.4 - Semantic and release governance
+
+- [x] Case-sensitive HTTP method-set comparison for `Allow` and CORS method declarations
+- [x] Ordered comparison and structured limitations for ambiguous `Cache-Control`
+- [x] Explicitly aligned safety documentation and authorization boundaries
+- [x] CODEOWNERS coverage for the release control plane and corrected core
+- [x] Signed annotated tag verification in every publishing workflow
+- [x] Protected release environment and verifiable Python/container provenance
+
+## 0.4 - Authorization-first experiment engine
+
+- Enforce an authorization policy before any network operation, including every redirect
+- Constrain scheme, host, port, path, method, redirect destination, and policy expiration
+- Centralize total, per-target, redirect, byte, duration, concurrency, and mutation-risk budgets
+- Charge every control, mutation, retry, and redirect against the same budget ledger
+- Extract one stable `ExperimentOracle` and Python API from CLI orchestration
+- Produce schema-valid partial evidence for cancellation, rejection, failure, and exhausted budgets
+- Begin CLI decomposition and migrate the first legacy workflow to the shared oracle
+
+## 0.5 - Product-wide evidence oracle
 
 - Integrate repeated controls into impact, profiles, discovery, and isolation
 - Replace first-sample baselines with robust baseline distributions
 - Add median absolute deviation for latency and length signals
+- Add explicit exact, conservative, and guarded content-aware body-comparison policies
 - Extend schema compatibility tests to every legacy command as it adopts the experiment oracle
-- Split the CLI into command modules over a stable Python engine API
+- Complete CLI decomposition into policy, workflow, evidence, and presentation modules
+- Stabilize the public Python SDK
 
-## 0.5 - Trust Influence Graph
+## Trust Influence Graph
 
 - Model input, boundary-hypothesis, and observable-outcome nodes
 - Attach evidence edges with reproducibility and transport provenance
@@ -72,10 +93,9 @@ adding more mutation families.
 
 ## 0.7 - Enterprise operation
 
-- Signed scope manifests and explicit target authorization policy
-- Request budgets, concurrency ceilings, and mutation safety levels
+- Signed authorization-policy distribution and organizational trust roots
 - Secret redaction and encrypted evidence storage
-- Stable SDK and CI regression assertions
+- CI regression assertions and organization policy integration
 - OpenTelemetry-compatible audit events
 - Team review states and manual-validation workflow
 - Reproducible container images and signed releases with SBOMs

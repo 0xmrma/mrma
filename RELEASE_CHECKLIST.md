@@ -25,6 +25,8 @@
 - [ ] response limits and transport failures produce typed evidence instead of crashes
 - [ ] redirect and retry traces affect verdicts when final responses are identical
 - [ ] equivalent redirect targets and parsed response headers do not create false signals
+- [ ] method-token case and ambiguous cache-directive order remain decision-bearing
+- [ ] ambiguous cache syntax emits `AMBIGUOUS_CACHE_CONTROL`
 - [ ] retry error subtypes are decision-bearing while timing remains quantitative context
 - [ ] assurance presets, profiles, and structured limitations satisfy v4 cross-field constraints
 - [ ] durable evidence mode syncs the file and the parent directory where supported
@@ -41,3 +43,7 @@
 - [ ] Result dimensions are not presented as severity or exploitability
 - [ ] release tag is cut only after all quality, CodeQL, and container checks pass on its commit
 - [ ] base image digest and hash-locked container requirements are current and reviewed
+- [ ] release tag is annotated, SSH-signed, and accepted by `.github/release-signers`
+- [ ] protected `release` environment approval gates every publishing job
+- [ ] release assets and OCI provenance pass the documented `gh` verification commands
+- [ ] published OCI index is pinned by digest and contains AMD64, ARM64, and attestation manifests

@@ -2,20 +2,27 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 _PERCENT_ESCAPE = re.compile(r"%([0-9A-Fa-f]{2})")
+_TOKEN = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _UNRESERVED = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
-_CASE_INSENSITIVE_TOKEN_SETS = frozenset(
+_CASE_INSENSITIVE_FIELD_NAME_SETS = frozenset(
     {
-        "allow",
         "vary",
         "access-control-allow-headers",
-        "access-control-allow-methods",
         "access-control-expose-headers",
     }
 )
+_CASE_SENSITIVE_METHOD_SETS = frozenset({"allow", "access-control-allow-methods"})
 _URI_REFERENCE_HEADERS = frozenset({"location", "content-location"})
+
+
+@dataclass(frozen=True)
+class _CacheControlAnalysis:
+    values: tuple[object, ...]
+    ambiguities: tuple[str, ...] = ()
 
 
 def _normalize_percent_encoding(value: str) -> str:
@@ -96,8 +103,9 @@ def canonical_uri(reference: str, *, base_url: str | None = None) -> str:
         return value
 
 
-def _split_quoted_commas(values: Iterable[str]) -> list[str]:
+def _split_quoted_commas(values: Iterable[str]) -> tuple[list[str], bool]:
     fields: list[str] = []
+    well_formed = True
     for value in values:
         start = 0
         quoted = False
@@ -113,7 +121,9 @@ def _split_quoted_commas(values: Iterable[str]) -> list[str]:
                 fields.append(value[start:index].strip())
                 start = index + 1
         fields.append(value[start:].strip())
-    return [field for field in fields if field]
+        if quoted or escaped:
+            well_formed = False
+    return [field for field in fields if field], well_formed
 
 
 def _unquote(value: str) -> str:
@@ -134,16 +144,49 @@ def _unquote(value: str) -> str:
     return "".join(output)
 
 
-def _cache_control(values: tuple[str, ...]) -> tuple[tuple[str, str | None], ...]:
+def _cache_control(values: tuple[str, ...]) -> _CacheControlAnalysis:
+    fields, well_formed = _split_quoted_commas(values)
     directives: list[tuple[str, str | None]] = []
-    for field in _split_quoted_commas(values):
+    malformed = not well_formed
+    for field in fields:
         name, separator, raw_value = field.partition("=")
         directive_name = name.strip().lower()
-        if not directive_name:
-            continue
-        directive_value = _unquote(raw_value.strip()) if separator else None
+        raw_value = raw_value.strip()
+        if not directive_name or _TOKEN.fullmatch(directive_name) is None:
+            malformed = True
+        if separator and not raw_value:
+            malformed = True
+        if separator and raw_value.startswith('"'):
+            if not raw_value.endswith('"') or len(raw_value) < 2:
+                malformed = True
+        elif separator and _TOKEN.fullmatch(raw_value) is None:
+            malformed = True
+        directive_value = _unquote(raw_value) if separator else None
         directives.append((directive_name, directive_value))
-    return tuple(sorted(directives, key=lambda item: (item[0], item[1] or "")))
+
+    if malformed:
+        ordered = tuple(value.strip() for value in values)
+        return _CacheControlAnalysis(
+            ("ambiguous-cache-control", "malformed-syntax", *ordered),
+            ("malformed-syntax",),
+        )
+
+    names = [name for name, _ in directives]
+    if len(names) != len(set(names)):
+        return _CacheControlAnalysis(
+            ("ambiguous-cache-control", "duplicate-directive", *directives),
+            ("duplicate-directive",),
+        )
+
+    canonical = tuple(sorted(directives, key=lambda item: (item[0], item[1] or "")))
+    return _CacheControlAnalysis(canonical)
+
+
+def header_semantic_ambiguities(name: str, values: tuple[str, ...]) -> tuple[str, ...]:
+    """Return stable ambiguity reasons for fields that cannot be safely canonicalized."""
+    if name.lower() == "cache-control":
+        return _cache_control(values).ambiguities
+    return ()
 
 
 def canonical_header_values(
@@ -154,13 +197,16 @@ def canonical_header_values(
 ) -> tuple[object, ...]:
     """Canonicalize only fields whose semantics are explicitly understood."""
     lowered = name.lower()
-    if lowered in _CASE_INSENSITIVE_TOKEN_SETS:
+    if lowered in _CASE_INSENSITIVE_FIELD_NAME_SETS:
         tokens = {
             token.strip().lower() for value in values for token in value.split(",") if token.strip()
         }
         return tuple(sorted(tokens))
+    if lowered in _CASE_SENSITIVE_METHOD_SETS:
+        tokens = {token.strip() for value in values for token in value.split(",") if token.strip()}
+        return tuple(sorted(tokens))
     if lowered == "cache-control":
-        return _cache_control(values)
+        return _cache_control(values).values
     if lowered in _URI_REFERENCE_HEADERS and base_url:
         return tuple(canonical_uri(value, base_url=base_url) for value in values)
     return values

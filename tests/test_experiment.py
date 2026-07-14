@@ -187,6 +187,53 @@ def test_state_assurance_and_limitations_cover_every_mode(mode, expected, limite
     assert ("RESPONSE_STATE_REUSE" in codes) is limited
 
 
+def test_ambiguous_cache_control_is_structured_as_a_run_limitation():
+    baseline, mutated = mutation_pair()
+    result = run_experiment(
+        baseline,
+        mutated,
+        lambda _arm, _req: FakeResponse(
+            b"same", {"cache-control": "max-age=0, max-age=3600"}
+        ),
+        ExperimentConfig(rounds=20),
+    )
+
+    assert result.verdict == "NO_INFLUENCE_OBSERVED"
+    limitation = next(
+        item
+        for item in result.to_dict()["limitations"]
+        if item["code"] == "AMBIGUOUS_CACHE_CONTROL"
+    )
+    assert limitation["severity"] == "moderate"
+    assert limitation["scope"] == "response_header_equivalence"
+
+
+@pytest.mark.parametrize(
+    ("name", "control_value", "mutation_value"),
+    [
+        ("allow", "GET", "get"),
+        (
+            "cache-control",
+            "max-age=0, max-age=3600",
+            "max-age=3600, max-age=0",
+        ),
+    ],
+)
+def test_security_relevant_method_case_and_cache_order_affect_verdicts(
+    name, control_value, mutation_value
+):
+    baseline, mutated = mutation_pair()
+
+    def sender(arm: str, _req: RawRequest) -> FakeResponse:
+        value = mutation_value if arm == "mutation" else control_value
+        return FakeResponse(b"same", {name: value})
+
+    result = run_experiment(baseline, mutated, sender, ExperimentConfig(rounds=20))
+
+    assert result.verdict == "INFLUENCE_DETECTED"
+    assert result.header_shift_counts == {name: 20}
+
+
 def test_header_only_influence_preserves_duplicate_values_without_exporting_them():
     baseline, mutated = mutation_pair()
 

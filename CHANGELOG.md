@@ -3,6 +3,33 @@
 All notable changes are documented here. MRMA follows semantic versioning for the CLI and uses an
 independent version in each machine-readable evidence schema.
 
+## 0.3.4 - 2026-07-14
+
+### HTTP Semantic Correctness
+
+- `Allow` and `Access-Control-Allow-Methods` now preserve case-sensitive HTTP method tokens while
+  retaining order-insensitive set comparison. Header-name sets in `Vary` and CORS response fields
+  remain correctly case-insensitive.
+- Conflicting duplicate or malformed `Cache-Control` directives no longer pass through the normal
+  order-insensitive canonicalizer. Their normalized order remains decision-bearing and results
+  emit the structured `AMBIGUOUS_CACHE_CONTROL` limitation.
+- Added deterministic and property-based regression tests for method casing, method ordering,
+  duplicate directive order, malformed quoting, and limitation export.
+
+### Safety And Release Governance
+
+- Safety documentation now states that 0.3.x does not enforce authorization manifests or
+  centralized request budgets. Authorization-first networking and complete budget accounting are
+  explicit v0.4 acceptance criteria.
+- Added CODEOWNERS coverage for workflows, release signers, the corrected core, schemas, container
+  inputs, and dependency locks.
+- Publishing workflows now accept only signed annotated tags, verify the signer before publishing,
+  and run through the protected `release` environment. Arbitrary container-version dispatch was
+  removed.
+- Container publication now creates GitHub-signed provenance in addition to BuildKit provenance
+  and SBOM manifests. Added release, asset, container, signer-workflow, source-ref, and OCI-digest
+  verification instructions.
+
 ## 0.3.3 - 2026-07-14
 
 ### Semantic Precision

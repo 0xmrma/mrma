@@ -21,7 +21,11 @@ from .compare import (
     resolve_equivalence_policy,
 )
 from .http_client import CapturedResponse, RedirectHop
-from .http_semantics import canonical_header_values, canonical_uri
+from .http_semantics import (
+    canonical_header_values,
+    canonical_uri,
+    header_semantic_ambiguities,
+)
 from .privacy import EvidenceRedactor
 from .raw_request import RawRequest
 from .sender import AttemptRecord, SendOutcome
@@ -1123,6 +1127,22 @@ def _limitations(result: ExperimentResult) -> list[dict[str, str]]:
                 "redirect_semantics",
                 "At least one redirect target was inferred without the actual followed request URL.",
                 "Capture redirects through the semantic transport to record resolved targets.",
+            )
+        )
+    if any(
+        header_semantic_ambiguities(
+            "cache-control", item.headers.get("cache-control", ())
+        )
+        for item in result.observations
+    ):
+        limitations.append(
+            _limitation(
+                "AMBIGUOUS_CACHE_CONTROL",
+                "moderate",
+                "response_header_equivalence",
+                "Duplicate directives or malformed Cache-Control syntax prevented "
+                "order-insensitive canonicalization.",
+                "Review the ordered response-header evidence and intermediary behavior.",
             )
         )
     limitations.append(

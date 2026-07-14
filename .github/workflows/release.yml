@@ -12,9 +12,19 @@ permissions:
 
 jobs:
   python-distribution:
+    environment: release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+      - name: Verify signed annotated release tag
+        shell: bash
+        run: |
+          test "$(git cat-file -t "$GITHUB_REF_NAME")" = tag
+          git config gpg.format ssh
+          git config gpg.ssh.allowedSignersFile "$GITHUB_WORKSPACE/.github/release-signers"
+          git verify-tag "$GITHUB_REF_NAME"
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.13"
