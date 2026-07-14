@@ -1,4 +1,4 @@
 # Runtime dependencies only. CI resolves these constraints and audits the full transitive set.
 httpx>=0.27,<1
-rich>=13.7,<15
+rich>=13.7,<16
 tomli>=2.4.1; python_version < "3.11"
