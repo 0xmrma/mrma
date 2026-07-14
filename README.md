@@ -50,6 +50,22 @@ mrma experiment \
 The output declares `mrma.experiment/v1` and labels the transport as `semantic-http`. MRMA currently
 uses `httpx`, so it does not claim byte-for-byte HTTP/1 wire reproduction.
 
+## Container package
+
+MRMA is published as a non-root multi-architecture container through GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/0xmrma/mrma:0.3.0
+docker run --rm ghcr.io/0xmrma/mrma:0.3.0 --version
+```
+
+Run an authorized experiment from the container:
+
+```bash
+docker run --rm ghcr.io/0xmrma/mrma:0.3.0 \
+  experiment --url https://example.com --set-header "X-Test: 1"
+```
+
 ## Workflows
 
 | Goal | Command |
