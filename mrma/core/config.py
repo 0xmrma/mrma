@@ -5,15 +5,13 @@ from typing import Any
 
 try:
     import tomllib  # py3.11+
-except Exception:  # pragma: no cover
-    tomllib = None  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
+    import tomli as tomllib
 
 
 def _read_toml(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
-    if tomllib is None:
-        raise RuntimeError("tomllib not available (need Python 3.11+)")
     data = tomllib.loads(path.read_text(encoding="utf-8", errors="replace"))
     if isinstance(data, dict):
         return data

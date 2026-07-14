@@ -37,7 +37,7 @@ def measure_stability(
 
     for _ in range(repeats):
         status, body = fetch_once()
-        text = normalize_text(body) if preset == "dynamic" else body.decode("utf-8", errors="replace")
+        text = normalize_text(body, preset=preset)
         samples.append(RunSample(status=status, length=len(body), body_text=text))
 
     status_counts: dict[int, int] = {}

@@ -3,23 +3,25 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
-from pathlib import Path
 import sys
-import platform
+import time
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
+from uuid import uuid4
 
-from rich.console import Console
+from rich import box
+from rich.panel import Panel
 from rich.table import Table
 
 from . import __version__
 from .core.compare import EquivalenceConfig, equivalent_response
 from .core.config import cfg_defaults, default_config_paths, load_config
 from .core.discover import discover_required_headers
+from .core.experiment import ExperimentConfig, run_experiment
 from .core.export import to_curl, to_raw
 from .core.fingerprint import fingerprint_response
 from .core.header_sets import common_headers
-from .core.http_client import SendOptions, send_raw_request
+from .core.http_client import SemanticHttpTransport, SendOptions, send_raw_request
 from .core.impact import run_impact
 from .core.isolate import isolate_added_headers
 from .core.isolate_remove import isolate_removed_headers
@@ -37,56 +39,8 @@ from .core.stability import measure_stability
 from .profiles.host_routing import default_host_routing_cases, run_host_routing_profile
 from .profiles.proxy_trust import default_proxy_trust_cases, run_proxy_trust_profile
 from .profiles.security_headers import audit_security_headers
+from .ui import console, print_home, verdict_style
 
-console = Console()
-
-def print_banner_once() -> None:
-    # show once per terminal (tty) session
-    try:
-        tty = os.ttyname(sys.stdout.fileno())
-        safe_tty = tty.replace("/", "_")
-    except Exception:
-        safe_tty = "unknown"
-
-    flag = Path(f"/tmp/mrma_banner{safe_tty}.flag")
-    if flag.exists():
-        return
-    try:
-        flag.write_text("1", encoding="utf-8")
-    except Exception:
-        # if /tmp not writable, fall back to per-process env
-        if os.environ.get("MRMA_BANNER_SHOWN") == "1":
-            return
-        os.environ["MRMA_BANNER_SHOWN"] = "1"
-
-    # config paths (safe, doesn’t require reading files)
-    try:
-        paths = default_config_paths()
-        local_path = str(paths.get("local"))
-        global_path = str(paths.get("global"))
-    except Exception:
-        local_path = "./mrma.toml"
-        global_path = "~/.config/mrma/config.toml"
-
-    console.print(
-        "[bold red]"
-        "███╗   ███╗██████╗ ███╗   ███╗ █████╗\n"
-        "████╗ ████║██╔══██╗████╗ ████║██╔══██╗\n"
-        "██╔████╔██║██████╔╝██╔████╔██║███████║\n"
-        "██║╚██╔╝██║██╔══██╗██║╚██╔╝██║██╔══██║\n"
-        "██║ ╚═╝ ██║██║  ██║██║ ╚═╝ ██║██║  ██║\n"
-        "╚═╝     ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝"
-        "[/bold red]"
-    )
-    console.print(
-        f"[bold]mrma[/bold] — HTTP Trust Boundary Analyzer ([bold]authorized testing only[/bold])"
-    )
-    console.print(
-        f"[dim]version={__version__}  python={platform.python_version()}  "
-        f"os={platform.system()}[/dim]"
-    )
-    console.print(f"[dim]config local={local_path}  global={global_path}[/dim]")
-    console.print("[dim]author=0xMRMA  site=https://0xmrma.com[/dim]\n")
 
 def _load_cfg_for_args(args):
     # args.no_config may not exist on some parsers; handle safely
@@ -161,9 +115,6 @@ def _emit_json_if_requested(args, payload) -> bool:
     # If --out is set, write JSON to file; else print to stdout
     out_path = getattr(args, "out_json", None)
     if out_path:
-        import json
-        from pathlib import Path
-
         Path(out_path).write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -181,6 +132,51 @@ def _apply_add_common(req, add_common: bool):
     for k, v in common_headers():
         out = set_header(out, k, v, override=False)
     return out
+
+
+def _apply_header_mutations(req: RawRequest, args) -> tuple[RawRequest, list[str], list[str]]:
+    mutated = req
+    removed = getattr(args, "remove_header", None) or []
+    if isinstance(removed, str):
+        removed = [removed]
+    for name in removed:
+        mutated = remove_header(mutated, name)
+
+    set_names: list[str] = []
+    for header in getattr(args, "set_header", None) or []:
+        if ":" not in header:
+            raise SystemExit(f"--set-header must be like 'Name: value' (got {header!r})")
+        name, value = header.split(":", 1)
+        name = name.strip()
+        if not name:
+            raise SystemExit("--set-header requires a non-empty header name")
+        mutated = set_header(mutated, name, value.lstrip(), override=True)
+        set_names.append(name)
+
+    return mutated, list(removed), set_names
+
+
+def _redacted_target_metadata(base_url: str, req: RawRequest) -> dict[str, object]:
+    origin_parts = urlsplit(base_url)
+    hostname = origin_parts.hostname or ""
+    display_host = f"[{hostname}]" if ":" in hostname else hostname
+    port = f":{origin_parts.port}" if origin_parts.port is not None else ""
+    origin = urlunsplit((origin_parts.scheme, f"{display_host}{port}", "", "", ""))
+
+    request_target = urlsplit(req.path)
+    path = request_target.path or "/"
+    query = request_target.query
+    metadata: dict[str, object] = {
+        "origin": origin,
+        "method": req.method,
+        "path": path,
+        "query_present": bool(query),
+    }
+    if query:
+        metadata["query_sha256"] = hashlib.sha256(
+            query.encode("utf-8", errors="replace")
+        ).hexdigest()
+    return metadata
 
 def cmd_config_show(args: argparse.Namespace) -> int:
     CFG = _load_cfg_for_args(args)
@@ -360,59 +356,40 @@ def cmd_report(args: argparse.Namespace) -> int:
         ]
     }
 
-    # ---- Trust Boundary Score (0-100) ----
+    # Keep observed dimensions separate. These counts are not severity or exploitability.
     signals: list[str] = []
-    score_tb = 0
+    if weak or missing:
+        signals.append(f"security headers: {weak} weak, {missing} missing")
 
-    # Security headers contribute directly (your existing score is 0 best)
-    # Convert sec score into risk points (cap 30)
-    sec_risk = min(int(score), 30)
-    if sec_risk:
-        score_tb += sec_risk
-        signals.append(f"security-headers score={score} (risk +{sec_risk})")
-
-    # Impact: count meaningful CHANGED rows (cap 20)
     changed_rows = [r for r in rows_sorted if not r.equivalent]
     if changed_rows:
-        add = min(len(changed_rows) * 2, 20)
-        score_tb += add
-        signals.append(f"impact: {len(changed_rows)} mutation(s) CHANGED (risk +{add})")
-        # highlight strongest deltas
+        signals.append(f"impact: {len(changed_rows)} mutation(s) changed")
         for r in changed_rows[:5]:
             signals.append(f"impact changed: {r.name} sim={r.similarity:.4f} status={r.status_base}->{r.status_mut}")
 
-    # Proxy-trust profile: changed cases are strong trust signals (cap 25)
     px_changed = [r for r in proxy_results if not r.equivalent]
     if px_changed:
-        add = min(len(px_changed) * 8, 25)
-        score_tb += add
-        signals.append(f"proxy-trust: {len(px_changed)} case(s) CHANGED (risk +{add})")
+        signals.append(f"proxy trust: {len(px_changed)} case(s) changed")
         for r in px_changed[:5]:
             loc = " loc-change" if (r.location_base != r.location_case) else ""
             signals.append(f"proxy-trust changed: {r.name} sim={r.similarity:.4f} status={r.status_base}->{r.status_case}{loc}")
 
-    # Host-routing profile: also strong signal (cap 25)
     hr_changed = [r for r in host_results if not r.equivalent]
     if hr_changed:
-        add = min(len(hr_changed) * 8, 25)
-        score_tb += add
-        signals.append(f"host-routing: {len(hr_changed)} case(s) CHANGED (risk +{add})")
+        signals.append(f"host routing: {len(hr_changed)} case(s) changed")
         for r in hr_changed[:5]:
             loc = " loc-change" if (r.location_base != r.location_case) else ""
             signals.append(f"host-routing changed: {r.name} sim={r.similarity:.4f} status={r.status_base}->{r.status_case}{loc}")
 
-    # Clamp final score
-    score_tb = max(0, min(score_tb, 100))
-
-    trust_boundary = {
-        "score": score_tb,
+    signal_summary = {
         "summary": (
-            "Higher means more evidence the response varies with trust-boundary headers "
-            "(proxy/host routing) or meaningful diffs. Validate on authorized targets only."
+            "Observed dimensions are reported separately. They are not a severity score, "
+            "proof of exploitability, or proof of which infrastructure component made a decision."
         ),
         "signals": signals,
         "breakdown": {
-            "security_headers_risk": sec_risk,
+            "security_headers_weak": weak,
+            "security_headers_missing": missing,
             "impact_changed": len(changed_rows),
             "proxy_trust_changed": len(px_changed),
             "host_routing_changed": len(hr_changed),
@@ -420,10 +397,11 @@ def cmd_report(args: argparse.Namespace) -> int:
     }
 
     report = {
+        "schema_version": "mrma.report/v2",
         "tool": {"name": "mrma", "version": __version__},
         "generated_at": utc_now_iso(),
         "target": {"url": args.url, "base_url": base_url, "method": req.method, "path": req.path},
-        "trust_boundary": trust_boundary,
+        "signal_summary": signal_summary,
         "baseline": baseline,
         "impact": impact,
         "security_headers": security_headers,
@@ -434,7 +412,6 @@ def cmd_report(args: argparse.Namespace) -> int:
     # Write files
     out_json = args.out_json
     out_md = args.out_md
-    from pathlib import Path
     Path(out_json).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8", errors="replace")
     Path(out_md).write_text(render_md_report(report), encoding="utf-8", errors="replace")
 
@@ -522,6 +499,214 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     console.print(table)
     return 0
+
+
+def cmd_experiment(args: argparse.Namespace) -> int:
+    base_url, req = _load_request(args)
+    cfg_data = _load_cfg_for_args(args)
+    defaults = cfg_defaults(cfg_data, "experiment")
+    apply_cfg_default(args, "rounds", 5, defaults.get("rounds"))
+    apply_cfg_default(args, "preset", "default", defaults.get("preset"))
+    apply_cfg_default(args, "timeout", 15.0, defaults.get("timeout"))
+    apply_cfg_default(args, "min_similarity", 0.985, defaults.get("min_similarity"))
+    apply_cfg_default(
+        args,
+        "max_len_delta_ratio",
+        0.02,
+        defaults.get("max_len_delta_ratio"),
+    )
+    apply_cfg_default(
+        args,
+        "min_reproducibility",
+        0.8,
+        defaults.get("min_reproducibility"),
+    )
+    apply_cfg_default(
+        args,
+        "max_control_change_rate",
+        0.2,
+        defaults.get("max_control_change_rate"),
+    )
+    apply_cfg_list_default(args, "ignore_header", defaults.get("ignore_headers"))
+    apply_cfg_list_default(args, "ignore_body_regex", defaults.get("ignore_body_regex"))
+
+    if not 3 <= args.rounds <= 100:
+        raise SystemExit("Error: --rounds must be between 3 and 100")
+    if not 0.0 <= args.min_similarity <= 1.0:
+        raise SystemExit("Error: --min-similarity must be between 0 and 1")
+    if args.max_len_delta_ratio < 0.0:
+        raise SystemExit("Error: --max-len-delta-ratio cannot be negative")
+    if not 0.5 < args.min_reproducibility <= 1.0:
+        raise SystemExit("Error: --min-reproducibility must be greater than 0.5 and at most 1")
+    if not 0.0 <= args.max_control_change_rate < 0.5:
+        raise SystemExit("Error: --max-control-change-rate must be at least 0 and less than 0.5")
+    if args.timeout <= 0 or args.delay < 0 or args.rps < 0 or args.retries < 0:
+        raise SystemExit("Error: timeout must be positive; delay, rps, and retries cannot be negative")
+
+    baseline = _apply_add_common(req, args.add_common)
+    mutated, removed_headers, set_headers = _apply_header_mutations(baseline, args)
+    if not removed_headers and not set_headers:
+        raise SystemExit("Error: experiment requires --set-header and/or --remove-header")
+
+    equivalence = EquivalenceConfig(
+        min_similarity=args.min_similarity,
+        max_len_delta_ratio=args.max_len_delta_ratio,
+        require_same_status=(not args.allow_status_change),
+        preset=args.preset,
+        ignore_headers=tuple(args.ignore_header or []),
+        ignore_body_regex=tuple(args.ignore_body_regex or []),
+    )
+    experiment_cfg = ExperimentConfig(
+        rounds=args.rounds,
+        min_reproducibility=args.min_reproducibility,
+        max_control_change_rate=args.max_control_change_rate,
+        equivalence=equivalence,
+    )
+    opts = SendOptions(
+        timeout_s=args.timeout,
+        follow_redirects=args.follow_redirects,
+        verify_tls=(not args.insecure),
+    )
+    retry_status = tuple(
+        int(value.strip())
+        for value in (args.retry_status.split(",") if args.retry_status else [])
+        if value.strip().isdigit()
+    )
+    policy = SendPolicy(
+        delay_s=args.delay,
+        rps=args.rps,
+        retries=args.retries,
+        retry_status=retry_status or (429, 502, 503, 504),
+    )
+    gate = RateGate()
+    run_id = uuid4().hex
+    started_at = utc_now_iso()
+    timer = time.perf_counter()
+
+    with SemanticHttpTransport(opts) as transport:
+
+        def sender(request: RawRequest):
+            return send_with_policy(
+                lambda: transport.send(request, base_url),
+                policy=policy,
+                gate=gate,
+            )
+
+        if args.json:
+            result = run_experiment(baseline, mutated, sender, experiment_cfg)
+        else:
+            with console.status(
+                "[signal]Running counterbalanced control/mutation experiment[/signal]",
+                spinner="dots12",
+            ) as status:
+
+                def update_progress(done: int, total: int, arm: str) -> None:
+                    status.update(
+                        f"[signal]Collecting evidence[/signal]  {done}/{total}  [muted]{arm}[/muted]"
+                    )
+
+                result = run_experiment(
+                    baseline,
+                    mutated,
+                    sender,
+                    experiment_cfg,
+                    on_progress=update_progress,
+                )
+
+    duration_ms = round((time.perf_counter() - timer) * 1000, 3)
+    target_metadata = _redacted_target_metadata(base_url, baseline)
+    payload = {
+        "schema_version": "mrma.experiment/v1",
+        "run": {
+            "id": run_id,
+            "started_at": started_at,
+            "completed_at": utc_now_iso(),
+            "duration_ms": duration_ms,
+        },
+        "tool": {"name": "mrma", "version": __version__},
+        "transport": {
+            "mode": "semantic-http",
+            "adapter": "httpx",
+            "connection_reuse": True,
+        },
+        "target": target_metadata,
+        "mutation": {
+            "set_header_names": set_headers,
+            "removed_header_names": removed_headers,
+            "values_redacted": True,
+        },
+        "thresholds": {
+            "preset": args.preset,
+            "min_similarity": args.min_similarity,
+            "max_len_delta_ratio": args.max_len_delta_ratio,
+            "min_reproducibility": args.min_reproducibility,
+            "max_control_change_rate": args.max_control_change_rate,
+        },
+        "result": result.to_dict(),
+    }
+    if _emit_json_if_requested(args, payload):
+        return 0
+
+    style = verdict_style(result.verdict)
+    heading = result.verdict.replace("_", " ")
+    mutation_names = [f"set {name}" for name in set_headers]
+    mutation_names.extend(f"remove {name}" for name in removed_headers)
+    summary = Table.grid(expand=True)
+    summary.add_column()
+    summary.add_column(justify="right")
+    summary.add_row(f"[{style}]{heading}[/{style}]", f"[bold]{result.evidence_grade.upper()} EVIDENCE[/bold]")
+    summary.add_row(
+        f"[muted]{baseline.method} {target_metadata['path']}[/muted]",
+        f"[muted]{', '.join(mutation_names)}[/muted]",
+    )
+    console.print(
+        Panel(
+            summary,
+            title="[brand]MRMA EXPERIMENT[/brand]",
+            border_style=style,
+            box=box.SQUARE,
+            padding=(0, 1),
+        )
+    )
+
+    evidence = Table(box=box.SIMPLE_HEAD, show_edge=False, pad_edge=False, expand=True)
+    evidence.add_column("SIGNAL", style="muted", width=24)
+    evidence.add_column("OBSERVED", style="bold white", width=23)
+    evidence.add_column("INTERPRETATION")
+    low, high = result.mutation_change_interval_95
+    evidence.add_row(
+        "Mutation reproducibility",
+        f"{result.mutation_changes}/{result.rounds} ({result.mutation_change_rate:.0%})",
+        f"95% interval {low:.0%}-{high:.0%}",
+    )
+    evidence.add_row(
+        "Control instability",
+        f"{result.control_changes}/{result.control_comparisons} ({result.control_change_rate:.0%})",
+        f"reject above {args.max_control_change_rate:.0%}",
+    )
+    evidence.add_row(
+        "Similarity contrast",
+        f"{result.similarity_contrast:+.4f}",
+        "control median minus mutation median",
+    )
+    evidence.add_row(
+        "Status shifts",
+        f"{result.status_shift_rounds}/{result.rounds}",
+        "paired control vs mutation",
+    )
+    console.print(evidence)
+
+    if result.header_shift_counts:
+        shifts = ", ".join(
+            f"{name} {count}/{result.rounds}"
+            for name, count in sorted(
+                result.header_shift_counts.items(), key=lambda item: (-item[1], item[0])
+            )
+        )
+        console.print(f"[muted]Response header evidence:[/muted] {shifts}")
+    console.print(f"[muted]Run {run_id[:12]}  |  mrma.experiment/v1  |  {duration_ms:.0f} ms[/muted]")
+    return 0
+
 
 def cmd_export(args: argparse.Namespace) -> int:
     base_url, req = _load_request(args)
@@ -1577,7 +1762,7 @@ def add_redirect_flags(p: argparse.ArgumentParser, default_follow: bool) -> None
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="mrma",
-        description="mrma - request replayer & header analyzer (authorized testing only)",
+        description="Evidence-driven HTTP trust-boundary experimentation (authorized testing only)",
     )
     p.add_argument("--version", action="version", version=f"mrma {__version__}")
     sub = p.add_subparsers(dest="cmd", required=False)
@@ -1616,6 +1801,92 @@ def build_parser() -> argparse.ArgumentParser:
         help="Append common headers (User-Agent/Accept/Connection) unless already present",
     )
     runp.set_defaults(func=cmd_run)
+
+    experiment = sub.add_parser(
+        "experiment",
+        help="Test one mutation with repeated, counterbalanced controls",
+        description=(
+            "Run an interleaved AB/BA experiment and reject unstable evidence. "
+            "Header values are redacted from result metadata."
+        ),
+    )
+    experiment.add_argument("--config", help="Path to a config TOML file")
+    experiment.add_argument("--no-config", action="store_true", help="Ignore config files")
+    experiment.add_argument("--request", "-r", help="Path to a raw HTTP request file")
+    experiment.add_argument("--base-url", "-u", help="Base URL when using --request")
+    experiment.add_argument("--url", help="Quick mode: full URL")
+    experiment.add_argument("--method", default="GET", help="Quick mode: HTTP method")
+    experiment.add_argument(
+        "-H",
+        "--header",
+        action="append",
+        help="Quick mode: add baseline header 'Name: value' (repeatable)",
+    )
+    experiment.add_argument("--data", help="Quick mode: request body")
+    experiment.add_argument(
+        "--set-header",
+        action="append",
+        help="Set a mutation header 'Name: value' (repeatable)",
+    )
+    experiment.add_argument(
+        "--remove-header",
+        action="append",
+        help="Remove a mutation header by name (repeatable)",
+    )
+    experiment.add_argument("--rounds", type=int, default=5, help="Paired rounds (3-100)")
+    experiment.add_argument(
+        "--preset",
+        choices=["default", "dynamic", "nextjs", "api-json"],
+        default="default",
+        help="Body normalization preset",
+    )
+    experiment.add_argument("--min-similarity", type=float, default=0.985)
+    experiment.add_argument("--max-len-delta-ratio", type=float, default=0.02)
+    experiment.add_argument(
+        "--min-reproducibility",
+        type=float,
+        default=0.8,
+        help="Mutation change rate required for an influence verdict",
+    )
+    experiment.add_argument(
+        "--max-control-change-rate",
+        type=float,
+        default=0.2,
+        help="Reject evidence when repeated controls change more often",
+    )
+    experiment.add_argument(
+        "--allow-status-change",
+        action="store_true",
+        help="Do not make an HTTP status change decisive by itself",
+    )
+    experiment.add_argument(
+        "--ignore-header",
+        action="append",
+        default=[],
+        help="Ignore a response evidence header (repeatable)",
+    )
+    experiment.add_argument(
+        "--ignore-body-regex",
+        action="append",
+        default=[],
+        help="Scrub a body regex before comparison (repeatable)",
+    )
+    experiment.add_argument("--timeout", type=float, default=15.0)
+    add_redirect_flags(experiment, default_follow=False)
+    experiment.add_argument("--insecure", action="store_true", help="Disable TLS verification")
+    experiment.add_argument("--delay", type=float, default=0.0, help="Delay between requests")
+    experiment.add_argument("--rps", type=float, default=0.0, help="Requests per second; 0 disables")
+    experiment.add_argument("--retries", type=int, default=0, help="Retries for transient statuses")
+    experiment.add_argument("--retry-status", default="429,502,503,504")
+    experiment.add_argument(
+        "--add-common",
+        action="store_true",
+        help="Add stable browser-like headers to both experiment arms",
+    )
+    experiment.add_argument("--json", action="store_true", help="Emit versioned JSON evidence")
+    experiment.add_argument("--out-json", help="Write JSON evidence to a file")
+    experiment.set_defaults(func=cmd_experiment)
+
     exp = sub.add_parser("export", help="Export current request as curl or raw HTTP")
     exp.add_argument("--request", "-r", help="Raw HTTP request file")
     exp.add_argument("--base-url", "-u", help="Base URL when using --request")
@@ -1932,15 +2203,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    # banner for plain help/version calls too
-    if len(sys.argv) == 1 or (len(sys.argv) == 2 and sys.argv[1] in ("-h", "--help")):
-        print_banner_once()
-
     parser = build_parser()
+
+    if len(sys.argv) == 1:
+        print_home(__version__)
+        raise SystemExit(0)
+    if len(sys.argv) == 2 and sys.argv[1] in ("-h", "--help"):
+        print_home(__version__)
+
     args = parser.parse_args()
 
     if not getattr(args, "cmd", None):
-        parser.print_help()
         raise SystemExit(0)
 
     rc = args.func(args)

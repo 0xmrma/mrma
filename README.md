@@ -1,218 +1,138 @@
-# mrma
+# MRMA
 
-<img width="840" height="260" alt="photo0" src="https://github.com/user-attachments/assets/753d9c41-74d1-4e62-af0c-e700ce824d9a" />
+**Evidence-driven HTTP trust-boundary experimentation for authorized security research.**
 
+MRMA determines whether an attacker-controlled request property reproducibly changes behavior
+across a layered HTTP system, then helps reduce that signal to the smallest responsible input.
+It is not a generic vulnerability scanner and it does not treat a one-off response difference as
+a finding.
 
-**HTTP Trust Boundary Analyzer** - replay requests, mutate headers safely, and quantify response influence (**authorized testing only**).
+> Status: `0.3.0` research preview. The experiment workflow is ready for controlled evaluation;
+> the broader command set is still being migrated to the same evidence standard.
 
-mrma helps answer: *“Does this target trust proxy/host headers or behave differently based on request metadata?”*  
-It focuses on **meaningful diffs** (not just status/length), plus **profiles** that model common trust-boundary behaviors.
+## The flagship workflow
 
----
-
-## Install
-
-### pipx (recommended)
-
-```bash
-pipx install .
-mrma --version
-```
-
-### dev / editable
+Test a single trust-boundary hypothesis with five unchanged controls and five mutations:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
-mrma --version
+mrma experiment \
+  --url https://target.example/account \
+  --set-header "X-Forwarded-Host: example.invalid" \
+  --rounds 5 \
+  --preset dynamic
 ```
 
-**Note**:If your system CA store is broken or you’re testing lab/self-signed certs, use --insecure.
+MRMA counterbalances request order (`AB/BA`), reuses one semantic HTTP session, measures unchanged
+control drift, and returns one of three verdicts:
 
----
+- `INFLUENCE_DETECTED`: the mutation crossed the configured threshold reproducibly.
+- `NO_INFLUENCE_OBSERVED`: no repeatable change was observed under this experiment.
+- `INCONCLUSIVE`: controls were unstable or mutation evidence was mixed.
 
-## Quick start
-### 1) Baseline fingerprint
+The result includes:
+
+- mutation reproducibility with a 95% Wilson interval;
+- control instability;
+- control-versus-mutation similarity contrast;
+- status and meaningful response-header shifts;
+- a short run ID and evidence schema version.
+
+Mutation values, URL credentials, query strings, and response-header values are redacted or hashed
+in result metadata. For automation, emit the complete versioned evidence object:
 
 ```bash
-mrma run --url https://example.com --follow-redirects
+mrma experiment \
+  --url https://example.com \
+  --set-header "X-Forwarded-For: 127.0.0.1" \
+  --json --out-json evidence.json
 ```
 
-### 2) Find the biggest response deltas (safe mutations)
+The output declares `mrma.experiment/v1` and labels the transport as `semantic-http`. MRMA currently
+uses `httpx`, so it does not claim byte-for-byte HTTP/1 wire reproduction.
+
+## Workflows
+
+| Goal | Command |
+|---|---|
+| Capture a fingerprint or measure repeat stability | `mrma run` |
+| Prove one mutation with interleaved controls | `mrma experiment` |
+| Compare one baseline and mutation quickly | `mrma diff` |
+| Rank a conservative mutation family | `mrma impact` |
+| Find request headers required to preserve behavior | `mrma discover` |
+| Minimize added headers that cause a change | `mrma isolate` |
+| Minimize removals that cause a change | `mrma isolate-remove` |
+| Evaluate proxy identity trust | `mrma profile proxy-trust` |
+| Evaluate host-routing influence | `mrma profile host-routing` |
+| Audit browser-facing security headers | `mrma profile security-headers` |
+| Export semantic requests as curl or HTTP text | `mrma export` |
+
+Run `mrma` for the compact workflow view or `mrma <command> --help` for command details.
+
+## Raw request input
+
+Requests exported by Burp or another proxy can be used as experiment baselines:
 
 ```bash
-mrma impact --url https://example.com --follow-redirects --top-deltas 10
+mrma experiment \
+  --request request.txt \
+  --base-url https://example.com \
+  --remove-header X-Forwarded-For
 ```
 
-### 3) Compare baseline vs a single mutation (diff)
+The current parser preserves header order and duplicate fields in the in-memory model, but
+`semantic-http` replay may normalize them. Wire-accurate HTTP/1 and protocol-specific transports are
+planned separately so transport claims remain honest.
+
+## Normalization
+
+Available body presets are `default`, `dynamic`, `nextjs`, and `api-json`. Explicit rules can remove
+target-specific noise:
 
 ```bash
-mrma diff --url https://example.com --follow-redirects --set-header "X-Test: 1"
+mrma experiment \
+  --url https://example.com/api/session \
+  --set-header "X-Test: 1" \
+  --ignore-header x-request-id \
+  --ignore-body-regex '"requestId"\s*:\s*"[^"]+"'
 ```
 
-### 4) Minimal required header set (delta debugging)
+Ignoring a field means the experiment cannot use that field as evidence. Keep the rule set narrow
+and record it with the result.
 
-```bash
-mrma discover --url https://example.com --follow-redirects --print-minimal-request
-```
+## Configuration
 
-### 5) Minimal header removals that cause a change (ddmin)
-
-```bash
-mrma isolate-remove --url https://example.com --follow-redirects \
-  --pack-file remove_headers.txt --preset dynamic --delay 0.2
-```
-
----
-
-## Why this is different
-
-Most tooling stops at: status code, length, or manual diffing.
-
-mrma adds:
-
-- **Preset-aware normalization** (`default`, `dynamic`, `nextjs`, `api-json`)
-- **Noise controls**: `--ignore-header`, `--ignore-body-regex`
-- **Stability measurement**: `run --repeat` (great for dynamic targets)
-- **Trust-boundary profiles**:
-  - `profile proxy-trust` (forwarded/proxy headers)
-  - `profile host-routing` (host-related routing headers)
-- **One-command reporting**:
-  - `mrma report` → `mrma_report.json` + `mrma_report.md`
-**Operational polish**:
-  - rate limiting + retries (`--rps`, `--retries`)
-  
----
-
-## Curated packs
-
-List packs:
-
-```bash
-mrma pack list
-```
-
-Proxy trust pack (extended):
-
-```bash
-mrma impact --url https://example.com --follow-redirects \
-  --pack proxy --depth extended --ip-set extended --top-deltas 15 --delay 0.2
-```
-
----
-
-## Raw request mode (exact reproduction)
-
-Replay a raw HTTP request file:
-
-```bash
-mrma run -r req.txt -u https://example.com --follow-redirects
-```
-
-Discover minimal request from a raw request:
-
-```bash
-mrma discover -r req.txt -u https://example.com --follow-redirects --print-minimal-request
-```
-
----
-
-## Ignore rules (reduce noise)
-
-Ignore volatile headers:
-
-```bash
-mrma diff --url https://example.com --follow-redirects --set-header "X-Test: 1" \
-  --ignore-header set-cookie --ignore-header date --ignore-header etag
-```
-
-Ignore noisy dynamic content using regex:
-
-```bash
-mrma diff --url https://example.com --follow-redirects --set-header "X-Test: 1" \
-  --ignore-body-regex '"nonce"\s*:\s*"[A-Za-z0-9\-_]+"' \
-  --ignore-body-regex '"requestId"\s*:\s*"[A-Za-z0-9\-_]+"'
-```
-
----
-
-## Reporting
-
-Generate a compact report:
-
-```bash
-mrma report --url https://example.com --follow-redirects --top-deltas 10
-ls -la mrma_report.*
-```
-
-Terminal-friendly Markdown viewing (optional):
-
-```bash
-sudo apt update && sudo apt install -y glow
-glow -p mrma_report.md
-```
-
----
-
-## JSON output
-
-Most commands support `--json`:
-
-```bash
-mrma impact --url https://example.com --pack proxy --top-deltas 5 --json
-```
-
----
-
-## Config
-
-Global config:
-
-- `~/.config/mrma/config.toml`
-
-Local (per-project):
-
-- `./mrma.toml`
-
-Show merged config:
-
-```bash
-mrma config --json
-```
-
-Example:
+MRMA merges `~/.config/mrma/config.toml` and a local `./mrma.toml`; local settings win. Use
+`--no-config` for an isolated run.
 
 ```toml
 [defaults]
-preset = "dynamic"
 timeout = 15.0
-min_similarity = 0.97
-max_len_delta_ratio = 0.05
+preset = "dynamic"
 
-[impact]
-delay = 0.2
-ip_set = "basic"
-ignore_headers = ["set-cookie", "date", "etag"]
+[experiment]
+rounds = 7
+min_similarity = 0.985
+max_len_delta_ratio = 0.02
+min_reproducibility = 0.8
+max_control_change_rate = 0.2
+ignore_headers = ["x-request-id"]
 ```
 
+## Research direction
 
-**Tip**: disable config for a single run:
+The [research position](docs/RESEARCH_POSITION.md) compares MRMA with Burp, Param Miner,
+AutoRepeater, ZAP, Nuclei, mitmproxy, Turbo Intruder, HTTP Request Smuggler, HTTP Garden, and
+Gudifu. The [roadmap](docs/ROADMAP.md) separates implemented capabilities from the planned Trust
+Influence Graph, stability-aware minimization, protocol transports, and enterprise controls.
 
-```bash
-mrma impact --url https://example.com --no-config
-```
+## Safety
 
----
-
-## Safety / legal
-
-- Use only on targets you are authorized to test.
-- These mutations are designed to be low-risk by default, but responsibility is yours.
-
----
+- Test only targets for which you have explicit authorization.
+- Start with low request rates and a small mutation set.
+- Do not treat influence as exploitability or severity.
+- Review requests that can alter state before replaying them.
+- Preserve the evidence, configuration, and transport label when reporting a result.
 
 ## Author
 
-- author: **0xMRMA**
-- site: https://0xmrma.com
+Mohamed Abdelaal / [0xMRMA](https://0xmrma.com)

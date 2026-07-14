@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 
 def utc_now_iso() -> str:
-    return datetime.now(UTC).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def md_escape(s: str) -> str:
@@ -24,18 +24,22 @@ def render_md_report(data: dict[str, Any]) -> str:
     lines.append(f"- Generated: `{data.get('generated_at','')}`")
     lines.append("")
 
-    # Trust boundary score
-    tb = data.get("trust_boundary", {})
-    if tb:
-        lines.append("## Trust boundary score")
+    signal_summary = data.get("signal_summary", {})
+    if signal_summary:
+        lines.append("## Observed signals")
         lines.append("")
-        lines.append(f"- Score: `{tb.get('score')}` / 100")
-
-        score_val = int(tb.get("score", 0) or 0)
-        severity = "LOW" if score_val <= 20 else "MED" if score_val <= 50 else "HIGH"
-        lines.append(f"- Severity: `{severity}`")
-
-        lines.append(f"- Summary: {md_escape(str(tb.get('summary','')))}")
+        lines.append(f"{md_escape(str(signal_summary.get('summary','')))}")
+        lines.append("")
+        breakdown = signal_summary.get("breakdown", {})
+        for name, value in breakdown.items():
+            lines.append(f"- {md_escape(str(name))}: `{value}`")
+        signals = signal_summary.get("signals", [])
+        if signals:
+            lines.append("")
+            lines.append("### Evidence notes")
+            lines.append("")
+            for signal in signals:
+                lines.append(f"- {md_escape(str(signal))}")
         lines.append("")
 
     # Baseline
