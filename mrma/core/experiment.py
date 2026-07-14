@@ -4,6 +4,7 @@ import hashlib
 import inspect
 import math
 import random
+import re
 import secrets
 import socket
 import ssl
@@ -24,6 +25,7 @@ from .http_client import CapturedResponse, RedirectHop
 from .http_semantics import (
     canonical_header_values,
     canonical_uri,
+    content_type_media_type,
     header_semantic_ambiguities,
 )
 from .privacy import EvidenceRedactor
@@ -73,6 +75,9 @@ EVIDENCE_RESPONSE_HEADERS = (
     "access-control-expose-headers",
     "allow",
 )
+BODY_SAFETY_HEADERS = ("content-type", "content-encoding")
+RESPONSE_HEADER_SCOPES = ("known", "explicit")
+_HEADER_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 
 
 @dataclass(frozen=True)
@@ -90,6 +95,12 @@ class ExperimentConfig:
     connection_mode: str = "reuse"
     max_response_bytes: int = 1024 * 1024
     body_storage: str = "sample"
+    response_header_scope: str = "known"
+    include_response_headers: tuple[str, ...] = ()
+    assume_text_without_content_type: bool = False
+    trust_environment: bool = False
+    tls_verification: str = "system"
+    proxy_mode: str = "none"
     assurance_preset: str = "custom"
     redactor: EvidenceRedactor = field(default_factory=EvidenceRedactor, repr=False)
 
@@ -143,6 +154,7 @@ class Observation:
     attempts: int
     headers: dict[str, tuple[str, ...]]
     body: bytes = field(repr=False)
+    body_comparator_eligible: bool = False
     attempt_trace: tuple[AttemptEvidence, ...] = ()
     error_type: str | None = None
     redirect_chain: tuple[RedirectHop, ...] = ()
@@ -176,7 +188,7 @@ class Observation:
             ),
             "body_digest_complete": self.body_digest_complete,
             "body_retained_complete": self.body_retained_complete,
-            "body_comparator_eligible": _body_comparator_eligible(self),
+            "body_comparator_eligible": self.body_comparator_eligible,
             "elapsed": redactor.elapsed_ms(self.elapsed_ms),
             "attempts": self.attempts,
             "attempt_trace": [
@@ -311,6 +323,7 @@ class ExperimentResult:
                 for pattern in self.effective_policy.ignore_body_regex
             ]
         )
+        decision_headers = _decision_response_headers(self.config, self.effective_policy)
         return {
             "verdict": self.verdict,
             "stop_reason": self.stop_reason,
@@ -334,6 +347,18 @@ class ExperimentResult:
                 "assurance_preset": self.config.assurance_preset,
                 "body_storage": self.config.body_storage,
                 "max_response_bytes": self.config.max_response_bytes,
+                "missing_content_type_policy": (
+                    "assume-text"
+                    if self.config.assume_text_without_content_type
+                    else "digest-only"
+                ),
+                "response_header_policy": {
+                    "scope": self.config.response_header_scope,
+                    "decision_headers": [
+                        redactor.header_name(name) for name in decision_headers
+                    ],
+                    "omitted_headers_possible": True,
+                },
                 "operating_characteristics": operating_characteristics(
                     planned_rounds,
                     self.config.min_reproducibility,
@@ -449,14 +474,28 @@ def _header_items(headers: object) -> Iterable[tuple[str, str]]:
 def _normalized_headers(
     headers: object,
     ignored: set[str],
+    evidence_names: set[str],
 ) -> dict[str, tuple[str, ...]]:
     selected: dict[str, list[str]] = {}
-    evidence_names = set(EVIDENCE_RESPONSE_HEADERS)
     for raw_name, value in _header_items(headers):
         name = raw_name.lower()
         if name in evidence_names and name not in ignored:
             selected.setdefault(name, []).append(value)
     return {name: tuple(values) for name, values in selected.items()}
+
+
+def _decision_response_headers(
+    cfg: ExperimentConfig,
+    policy: EffectiveEquivalencePolicy,
+) -> tuple[str, ...]:
+    selected = (
+        set(EVIDENCE_RESPONSE_HEADERS)
+        if cfg.response_header_scope == "known"
+        else set(BODY_SAFETY_HEADERS)
+    )
+    selected.update(name.strip().lower() for name in cfg.include_response_headers)
+    selected.difference_update(name.lower() for name in policy.ignore_headers)
+    return tuple(sorted(selected))
 
 
 def _exception_chain(exc: BaseException) -> Iterable[BaseException]:
@@ -523,6 +562,8 @@ def _observe(
     sender: Callable[..., object],
     policy: EffectiveEquivalencePolicy,
     sender_supports_context: bool,
+    evidence_names: set[str],
+    assume_text_without_content_type: bool,
 ) -> Observation:
     started = time.perf_counter()
     attempts = 1
@@ -573,6 +614,7 @@ def _observe(
             attempts=attempts,
             headers={},
             body=b"",
+            body_comparator_eligible=False,
             attempt_trace=attempt_trace,
             error_type=type(error).__name__ if error is not None else "MissingResponse",
         )
@@ -584,6 +626,11 @@ def _observe(
     digest_complete = captured.body_digest_complete if captured else True
     retained_complete = captured.body_retained_complete if captured else True
     outcome = POLICY_ABORT if captured and captured.response_limit_exceeded else HTTP_RESPONSE
+    headers = _normalized_headers(
+        getattr(response, "headers", ()),
+        set(policy.ignore_headers),
+        evidence_names,
+    )
     return Observation(
         arm=arm,
         round_index=round_index,
@@ -596,8 +643,13 @@ def _observe(
         body_retained_complete=retained_complete,
         elapsed_ms=round(elapsed_ms, 3),
         attempts=attempts,
-        headers=_normalized_headers(getattr(response, "headers", ()), set(policy.ignore_headers)),
+        headers=headers,
         body=body,
+        body_comparator_eligible=_body_comparator_eligible(
+            headers,
+            retained_complete,
+            assume_text_without_content_type,
+        ),
         attempt_trace=attempt_trace,
         error_type="ResponseLimitExceeded" if outcome == POLICY_ABORT else None,
         redirect_chain=captured.redirect_chain if captured else (),
@@ -769,16 +821,22 @@ def _timing_summary(
     }
 
 
-def _body_comparator_eligible(observation: Observation) -> bool:
-    if not observation.body_retained_complete:
+def _body_comparator_eligible(
+    headers: Mapping[str, tuple[str, ...]],
+    body_retained_complete: bool,
+    assume_text_without_content_type: bool,
+) -> bool:
+    if not body_retained_complete:
         return False
-    encodings = observation.headers.get("content-encoding", ())
+    encodings = headers.get("content-encoding", ())
     if any(value.strip().lower() not in {"", "identity"} for value in encodings):
         return False
-    content_types = observation.headers.get("content-type", ())
+    content_types = headers.get("content-type", ())
     if not content_types:
-        return True
-    media_type = content_types[-1].split(";", 1)[0].strip().lower()
+        return assume_text_without_content_type
+    media_type = content_type_media_type(content_types)
+    if media_type is None:
+        return False
     return (
         media_type.startswith("text/")
         or media_type.endswith(("+json", "+xml"))
@@ -830,7 +888,7 @@ def _compare(
             backoff_delta_ms=backoff_delta_ms,
         )
 
-    if _body_comparator_eligible(a) and _body_comparator_eligible(b):
+    if a.body_comparator_eligible and b.body_comparator_eligible:
         comparison = equivalent_response(a.status or 0, a.body, b.status or 0, b.body, policy)
         length_delta_ratio = abs(comparison.len_b - comparison.len_a) / max(comparison.len_a, 1)
         body_changed = comparison.sim < policy.min_similarity or (
@@ -1032,9 +1090,17 @@ def _assurance_profile(result: ExperimentResult) -> dict[str, object]:
         "normalization_risk": _normalization_risk(result),
         "transport_reproducibility": (
             "moderate"
-            if has_transport_outcome
+            if has_transport_outcome or result.config.trust_environment
             else "strong"
         ),
+        "transport_integrity": (
+            "limited"
+            if result.config.tls_verification == "disabled"
+            else "moderate"
+            if result.config.trust_environment
+            else "strong"
+        ),
+        "response_header_coverage": "limited",
         "effect_types": _effect_types(result),
         "reproduction_completeness": (
             "strong"
@@ -1062,6 +1128,26 @@ def _limitation(
 
 def _limitations(result: ExperimentResult) -> list[dict[str, str]]:
     limitations: list[dict[str, str]] = []
+    if result.config.tls_verification == "disabled":
+        limitations.append(
+            _limitation(
+                "TLS_VERIFICATION_DISABLED",
+                "high",
+                "transport_integrity",
+                "TLS peer verification was disabled for this experiment.",
+                "Repeat with system verification or an explicit approved CA bundle.",
+            )
+        )
+    if result.config.trust_environment:
+        limitations.append(
+            _limitation(
+                "ENVIRONMENT_TRANSPORT_CONFIGURATION",
+                "moderate",
+                "transport_reproducibility",
+                "HTTPX was allowed to consume proxy or CA configuration from the process environment.",
+                "Repeat with trust_environment=false and explicit transport inputs.",
+            )
+        )
     if result.config.connection_mode != "fresh-observation":
         limitations.append(
             _limitation(
@@ -1145,6 +1231,42 @@ def _limitations(result: ExperimentResult) -> list[dict[str, str]]:
                 "Review the ordered response-header evidence and intermediary behavior.",
             )
         )
+    if any(
+        header_semantic_ambiguities("content-type", item.headers.get("content-type", ()))
+        for item in result.observations
+    ):
+        limitations.append(
+            _limitation(
+                "AMBIGUOUS_CONTENT_TYPE",
+                "moderate",
+                "body_comparison",
+                "At least one response contained multiple or malformed Content-Type evidence.",
+                "Resolve the origin or intermediary ambiguity before interpreting body semantics.",
+            )
+        )
+    if result.config.assume_text_without_content_type:
+        limitations.append(
+            _limitation(
+                "UNDECLARED_CONTENT_TYPE_TEXT_ASSUMPTION",
+                "moderate",
+                "body_comparison",
+                "Responses without Content-Type were explicitly allowed into text comparison.",
+                "Repeat with the default digest-only missing Content-Type policy.",
+            )
+        )
+    decision_headers = _decision_response_headers(result.config, result.effective_policy)
+    public_headers = ", ".join(
+        result.config.redactor.header_name(name) for name in decision_headers
+    )
+    limitations.append(
+        _limitation(
+            "SELECTIVE_RESPONSE_HEADER_SCOPE",
+            "moderate",
+            "response_header_coverage",
+            f"Decision-bearing response headers were limited to: {public_headers}.",
+            "Add target-specific fields with --include-response-header or repeat under a future stable-header discovery policy.",
+        )
+    )
     limitations.append(
         _limitation(
             "SEMANTIC_HTTP_TRANSPORT",
@@ -1328,6 +1450,23 @@ def _validate_config(cfg: ExperimentConfig) -> tuple[int, int]:
         raise ValueError("max_response_bytes must be positive")
     if cfg.body_storage not in {"none", "sample", "full"}:
         raise ValueError("body_storage must be none, sample, or full")
+    if cfg.response_header_scope not in RESPONSE_HEADER_SCOPES:
+        raise ValueError("response_header_scope must be known or explicit")
+    invalid_headers = [
+        name
+        for name in cfg.include_response_headers
+        if _HEADER_NAME.fullmatch(name.strip()) is None
+    ]
+    if invalid_headers:
+        raise ValueError(f"invalid response evidence header name: {invalid_headers[0]!r}")
+    if cfg.tls_verification not in {"system", "custom-ca", "environment", "disabled"}:
+        raise ValueError("tls_verification must be system, custom-ca, environment, or disabled")
+    if cfg.proxy_mode not in {"none", "explicit", "environment"}:
+        raise ValueError("proxy_mode must be none, explicit, or environment")
+    if not cfg.trust_environment and (
+        cfg.tls_verification == "environment" or cfg.proxy_mode == "environment"
+    ):
+        raise ValueError("environment transport modes require trust_environment")
     if cfg.schedule_mode not in {"bracketed", "balanced"}:
         raise ValueError("schedule_mode must be bracketed or balanced")
     if cfg.schedule_mode == "balanced" and (min_rounds % 2 or max_rounds % 2):
@@ -1369,6 +1508,7 @@ def run_experiment(
         full_schedule = _schedule_blocks(max_rounds, seed)
     public_seed = None if cfg.schedule_mode == "bracketed" else seed
     policy = resolve_equivalence_policy(cfg.equivalence)
+    evidence_names = set(_decision_response_headers(cfg, policy))
     observations: list[Observation] = []
     sequence = 0
     result: ExperimentResult | None = None
@@ -1387,6 +1527,8 @@ def run_experiment(
                     sender,
                     policy,
                     sender_supports_context,
+                    evidence_names,
+                    cfg.assume_text_without_content_type,
                 )
             )
             if on_progress is not None:

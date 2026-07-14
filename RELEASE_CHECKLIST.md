@@ -8,7 +8,7 @@
 - [ ] `python -m compileall mrma` passes
 - [ ] wheel and sdist pass `twine check`
 - [ ] clean virtualenv installs the built wheel and passes `pip check`
-- [ ] `pip-audit` reports no known vulnerable runtime dependency
+- [ ] `pip-audit` reports no known vulnerable runtime dependency on Python 3.10 and 3.13
 - [ ] CI passes on Python 3.10 and 3.13 across Linux, Windows, and macOS
 
 ## Versioning
@@ -20,7 +20,7 @@
 - [ ] `mrma config --json` works
 - [ ] `mrma run --url https://example.com --follow-redirects` works
 - [ ] `mrma experiment` detects a deterministic local mutation
-- [ ] `mrma experiment --json` emits schema-valid `mrma.experiment/v4` without decoration
+- [ ] `mrma experiment --json` emits schema-valid `mrma.experiment/v5` without decoration
 - [ ] cookie state does not cross observations in default isolated mode
 - [ ] response limits and transport failures produce typed evidence instead of crashes
 - [ ] redirect and retry traces affect verdicts when final responses are identical
@@ -28,7 +28,11 @@
 - [ ] method-token case and ambiguous cache-directive order remain decision-bearing
 - [ ] ambiguous cache syntax emits `AMBIGUOUS_CACHE_CONTROL`
 - [ ] retry error subtypes are decision-bearing while timing remains quantitative context
-- [ ] assurance presets, profiles, and structured limitations satisfy v4 cross-field constraints
+- [ ] assurance presets, profiles, and structured limitations satisfy v5 cross-field constraints
+- [ ] experiment transport ignores environment proxy/CA settings unless explicitly enabled
+- [ ] transport evidence fingerprints proxy/CA configuration without exposing values or paths
+- [ ] absent or ambiguous `Content-Type` remains digest-only unless explicitly overridden
+- [ ] exact included response headers affect decisions and selected scope is machine-readable
 - [ ] durable evidence mode syncs the file and the parent directory where supported
 - [ ] every connection mode passes its state and pool-isolation tests
 - [ ] exit codes `10` and `11` match the documented `--fail-on` policy

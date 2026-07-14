@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ssl
 from dataclasses import dataclass
 from urllib.parse import urljoin, urlparse
 
@@ -17,9 +18,16 @@ SAMPLE_BODY_BYTES = 64 * 1024
 
 @dataclass(frozen=True)
 class SendOptions:
+    trust_env: bool
     timeout_s: float = 15.0
     follow_redirects: bool = False
     verify_tls: bool = True
+    proxy: str | None = None
+    ca_bundle: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.verify_tls and self.ca_bundle is not None:
+            raise ValueError("ca_bundle cannot be combined with disabled TLS verification")
 
 
 @dataclass(frozen=True)
@@ -88,10 +96,15 @@ class SemanticHttpTransport:
         self.close()
 
     def _new_client(self) -> httpx.Client:
+        verify: bool | ssl.SSLContext = self.opts.verify_tls
+        if self.opts.ca_bundle is not None:
+            verify = ssl.create_default_context(cafile=self.opts.ca_bundle)
         return httpx.Client(
             timeout=self.opts.timeout_s,
             follow_redirects=self.opts.follow_redirects,
-            verify=self.opts.verify_tls,
+            verify=verify,
+            trust_env=self.opts.trust_env,
+            proxy=self.opts.proxy,
         )
 
     def close(self) -> None:

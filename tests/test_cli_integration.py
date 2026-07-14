@@ -59,12 +59,12 @@ def test_cli_emits_schema_valid_evidence_and_stable_influence_exit_code():
     assert process.returncode == 10, process.stderr
     payload = json.loads(process.stdout)
     schema = json.loads(
-        files("mrma.schemas").joinpath("experiment-v4.schema.json").read_text(encoding="utf-8")
+        files("mrma.schemas").joinpath("experiment-v5.schema.json").read_text(encoding="utf-8")
     )
     Draft202012Validator.check_schema(schema)
     validator = Draft202012Validator(schema)
     validator.validate(payload)
-    assert payload["schema_version"] == "mrma.experiment/v4"
+    assert payload["schema_version"] == "mrma.experiment/v5"
     assert payload["result"]["verdict"] == "INFLUENCE_DETECTED"
     assert payload["result"]["design"]["control_observations"] == 40
     assert payload["run"]["started_at"].endswith(":00+00:00")
@@ -72,12 +72,27 @@ def test_cli_emits_schema_valid_evidence_and_stable_influence_exit_code():
     assert payload["run"]["duration"]["exact_ms"] is None
     assert isinstance(payload["run"]["duration"]["bucket"], str)
     assert payload["transport"]["retry_policy"]["max_retries"] == 0
+    assert payload["transport"]["trust_environment"] is False
+    assert payload["transport"]["tls"] == {
+        "verification": "system",
+        "ca_fingerprint": None,
+    }
+    assert payload["transport"]["proxy"] == {
+        "mode": "none",
+        "source": "none",
+        "endpoint_fingerprint": None,
+    }
     assert payload["evidence_storage"]["sink"] == "stdout"
     assert payload["evidence_storage"]["write_mode"] == "stdout"
     assert "evidence_grade" not in payload["result"]
     assert payload["result"]["design"]["assurance_preset"] == "research"
     assert payload["transport"]["connection_mode"] == "fresh-observation"
     assert payload["result"]["assurance_profile"]["connection_independence"] == "strong"
+    assert payload["result"]["assurance_profile"]["transport_integrity"] == "strong"
+    assert payload["result"]["design"]["missing_content_type_policy"] == "digest-only"
+    assert payload["result"]["design"]["response_header_policy"][
+        "omitted_headers_possible"
+    ] is True
     assert all(
         item["code"] != "CONNECTION_REUSE" for item in payload["result"]["limitations"]
     )
@@ -151,5 +166,24 @@ def test_cli_emits_schema_valid_evidence_and_stable_influence_exit_code():
         "scope": "experiment-json-only",
     }
     malformed.append(false_durable_claim)
+
+    hidden_environment_transport = deepcopy(payload)
+    hidden_environment_transport["transport"]["proxy"] = {
+        "mode": "environment",
+        "source": "environment",
+        "endpoint_fingerprint": "hmac-sha256:0123456789",
+    }
+    malformed.append(hidden_environment_transport)
+
+    missing_custom_ca_fingerprint = deepcopy(payload)
+    missing_custom_ca_fingerprint["transport"]["tls"] = {
+        "verification": "custom-ca",
+        "ca_fingerprint": None,
+    }
+    malformed.append(missing_custom_ca_fingerprint)
+
+    weakened_research_environment = deepcopy(payload)
+    weakened_research_environment["transport"]["trust_environment"] = True
+    malformed.append(weakened_research_environment)
 
     assert all(not validator.is_valid(document) for document in malformed)
