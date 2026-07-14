@@ -16,7 +16,7 @@ from . import __version__
 from .core.compare import EquivalenceConfig, equivalent_response, resolve_equivalence_policy
 from .core.config import cfg_defaults, default_config_paths, load_config
 from .core.discover import discover_required_headers
-from .core.experiment import ExperimentConfig, run_experiment
+from .core.experiment import ExperimentConfig, operating_characteristics, run_experiment
 from .core.export import to_curl, to_raw
 from .core.fingerprint import fingerprint_response
 from .core.header_sets import common_headers
@@ -115,11 +115,17 @@ def _emit_json_if_requested(args, payload) -> bool:
     # If --out is set, write JSON to file; else print to stdout
     out_path = getattr(args, "out_json", None)
     if out_path:
-        Path(out_path).write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-            errors="replace",
-        )
+        destination = Path(out_path)
+        temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
+        try:
+            temporary.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+                errors="replace",
+            )
+            temporary.replace(destination)
+        finally:
+            temporary.unlink(missing_ok=True)
     else:
         print_json(payload)
 
@@ -512,6 +518,7 @@ def cmd_experiment(args: argparse.Namespace) -> int:
     )
     apply_cfg_default(args, "body_storage", "sample", defaults.get("body_storage"))
     apply_cfg_default(args, "state_mode", "isolated", defaults.get("state_mode"))
+    apply_cfg_default(args, "connection_mode", "reuse", defaults.get("connection_mode"))
     apply_cfg_default(args, "schedule", "bracketed", defaults.get("schedule"))
     apply_cfg_default(args, "redaction_policy", "standard", defaults.get("redaction_policy"))
     apply_cfg_default(args, "min_similarity", 0.985, defaults.get("min_similarity"))
@@ -562,6 +569,10 @@ def cmd_experiment(args: argparse.Namespace) -> int:
         raise SystemExit("Error: schedule must be bracketed or balanced")
     if args.state_mode not in {"isolated", "per-arm", "shared-session"}:
         raise SystemExit("Error: state_mode must be isolated, per-arm, or shared-session")
+    if args.connection_mode not in {"reuse", "per-arm", "per-round", "fresh-observation"}:
+        raise SystemExit(
+            "Error: connection_mode must be reuse, per-arm, per-round, or fresh-observation"
+        )
     if args.body_storage not in {"none", "sample", "full"}:
         raise SystemExit("Error: body_storage must be none, sample, or full")
     if args.redaction_policy not in {"standard", "strict", "forensic"}:
@@ -624,6 +635,7 @@ def cmd_experiment(args: argparse.Namespace) -> int:
         seed=args.seed,
         schedule_mode=args.schedule,
         state_mode=args.state_mode,
+        connection_mode=args.connection_mode,
         max_response_bytes=args.max_response_bytes,
         body_storage=args.body_storage,
         redactor=redactor,
@@ -648,21 +660,54 @@ def cmd_experiment(args: argparse.Namespace) -> int:
     started_at = utc_now_iso()
     timer = time.perf_counter()
 
-    with SemanticHttpTransport(opts, state_mode=args.state_mode) as transport:
+    total_rounds = args.rounds or args.max_rounds
+    requests_per_round = 3 if args.schedule == "bracketed" else 2
+    characteristics = operating_characteristics(
+        total_rounds,
+        args.min_reproducibility,
+        args.no_influence_threshold,
+        args.max_control_change_rate,
+        total_rounds if args.schedule == "bracketed" else total_rounds - 1,
+    )
+    if not args.json:
+        positive = characteristics["positive_min_changed"]
+        negative = characteristics["negative_max_changed"]
+        console.print(
+            f"[muted]Design preview:[/muted] {total_rounds} rounds / "
+            f"{total_rounds * requests_per_round} requests; decisive influence requires "
+            f"{positive}/{total_rounds} changed, no influence requires at most "
+            f"{negative}/{total_rounds} changed."
+        )
 
-        def sender(arm: str, request: RawRequest):
+    with SemanticHttpTransport(
+        opts,
+        state_mode=args.state_mode,
+        connection_mode=args.connection_mode,
+    ) as transport:
+
+        def sender(
+            arm: str,
+            request: RawRequest,
+            *,
+            round_index: int,
+            sequence: int,
+        ):
             state_arm = "control" if arm.startswith("control") else "mutation"
-            return send_with_policy_outcome(
+            outcome = send_with_policy_outcome(
                 lambda: transport.capture(
                     request,
                     base_url,
                     state_arm,
                     max_response_bytes=args.max_response_bytes,
                     body_storage=args.body_storage,
+                    round_index=round_index,
                 ),
                 policy=policy,
                 gate=gate,
             )
+            if sequence % requests_per_round == 0:
+                transport.complete_round(round_index)
+            return outcome
 
         if args.json:
             result = run_experiment(baseline, mutated, sender, experiment_cfg)
@@ -686,23 +731,49 @@ def cmd_experiment(args: argparse.Namespace) -> int:
                 )
 
     duration_ms = round((time.perf_counter() - timer) * 1000, 3)
+    completed_at = utc_now_iso()
+    public_duration = redactor.run_duration_ms(duration_ms)
     target_metadata = _redacted_target_metadata(base_url, baseline, redactor)
     payload = {
-        "schema_version": "mrma.experiment/v2",
+        "schema_version": "mrma.experiment/v3",
         "run": {
             "id": run_id,
-            "started_at": started_at,
-            "completed_at": utc_now_iso(),
-            "duration_ms": duration_ms,
+            "started_at": redactor.run_timestamp(started_at),
+            "completed_at": redactor.run_timestamp(completed_at),
+            "timestamp_precision": {
+                "standard": "minute",
+                "strict": "date",
+                "forensic": "exact",
+            }[args.redaction_policy],
+            "duration": {
+                "exact_ms": public_duration if isinstance(public_duration, float) else None,
+                "bucket": public_duration if isinstance(public_duration, str) else None,
+            },
         },
         "tool": {"name": "mrma", "version": __version__},
         "transport": {
             "mode": "semantic-http",
             "adapter": "httpx",
-            "connection_reuse": True,
+            "connection_reuse": args.connection_mode != "fresh-observation",
+            "connection_mode": args.connection_mode,
             "state_mode": args.state_mode,
             "schedule": args.schedule,
             "redirects": "follow" if args.follow_redirects else "do-not-follow",
+            "http_versions": sorted(
+                {
+                    item.http_version
+                    for item in result.observations
+                    if item.http_version is not None
+                }
+            ),
+            "retry_policy": {
+                "max_retries": policy.retries,
+                "retry_statuses": list(policy.retry_status),
+                "backoff_base_ms": round(policy.backoff_base_s * 1000, 3),
+                "backoff_cap_ms": round(policy.backoff_cap_s * 1000, 3),
+                "delay_ms": round(policy.delay_s * 1000, 3),
+                "rps": policy.rps,
+            },
         },
         "privacy": {
             "policy": args.redaction_policy,
@@ -800,7 +871,7 @@ def cmd_experiment(args: argparse.Namespace) -> int:
         f"[muted]Stop: {result.stop_reason}  |  state: {args.state_mode}  |  "
         f"{schedule_detail}[/muted]"
     )
-    console.print(f"[muted]Run {run_id[:12]}  |  mrma.experiment/v2  |  {duration_ms:.0f} ms[/muted]")
+    console.print(f"[muted]Run {run_id[:12]}  |  mrma.experiment/v3  |  {duration_ms:.0f} ms[/muted]")
     return exit_code
 
 
@@ -2006,6 +2077,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["isolated", "per-arm", "shared-session"],
         default="isolated",
         help="Response-cookie state model; isolated preserves only explicit request state",
+    )
+    experiment.add_argument(
+        "--connection-mode",
+        choices=["reuse", "per-arm", "per-round", "fresh-observation"],
+        default="reuse",
+        help="Connection-pool scope; fresh-observation provides strongest isolation",
     )
     experiment.add_argument(
         "--max-response-bytes",

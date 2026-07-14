@@ -5,6 +5,7 @@ import hmac
 import ipaddress
 import secrets
 from dataclasses import dataclass, field
+from datetime import datetime
 from urllib.parse import urlsplit, urlunsplit
 
 from .raw_request import RawRequest
@@ -46,6 +47,42 @@ class EvidenceRedactor:
         bucket = 100 if self.policy == "strict" else 10
         lower = int(value // bucket) * bucket
         return f"{lower}-{lower + bucket - 1} ms"
+
+    def run_timestamp(self, value: str) -> str:
+        """Reduce run-level timestamp precision outside explicit forensic evidence."""
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if self.policy == "forensic":
+            return value
+        if self.policy == "strict":
+            return parsed.date().isoformat()
+        return parsed.replace(second=0, microsecond=0).isoformat()
+
+    def run_duration_ms(self, value: float) -> float | str:
+        if self.policy == "forensic":
+            return round(value, 3)
+        seconds = value / 1000
+        boundaries: tuple[tuple[int, str], ...] = (
+            (1, "<1 s"),
+            (5, "1-5 s"),
+            (15, "5-15 s"),
+            (30, "15-30 s"),
+            (60, "30-60 s"),
+            (120, "1-2 min"),
+            (300, "2-5 min"),
+            (900, "5-15 min"),
+            (3600, "15-60 min"),
+        )
+        if self.policy == "strict":
+            boundaries = (
+                (60, "<1 min"),
+                (300, "1-5 min"),
+                (900, "5-15 min"),
+                (3600, "15-60 min"),
+            )
+        for upper, label in boundaries:
+            if seconds < upper:
+                return label
+        return ">=60 min"
 
     def origin(self, origin: str) -> str:
         parts = urlsplit(origin)

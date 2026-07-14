@@ -1,3 +1,6 @@
+import gzip
+import hashlib
+
 import httpx
 
 from mrma.core.http_client import SemanticHttpTransport, SendOptions
@@ -128,6 +131,26 @@ def test_redirect_chain_records_cross_origin_and_redirect_cookie_is_observation_
     assert len(final_cookies) == 2
 
 
+def test_redirect_trace_records_cross_origin_credential_stripping(monkeypatch):
+    def handler(incoming: httpx.Request) -> httpx.Response:
+        if incoming.url.host == "example.test":
+            return httpx.Response(302, headers={"location": "https://other.test/final"})
+        return httpx.Response(200, content=b"done")
+
+    authorized = request("/start")
+    authorized.headers.append(("Authorization", "Bearer secret"))
+    with mock_transport(monkeypatch, "isolated", handler, follow_redirects=True) as transport:
+        captured = transport.capture(
+            authorized,
+            "https://example.test",
+            "control",
+            max_response_bytes=1024,
+            body_storage="full",
+        )
+
+    assert captured.redirect_chain[0].credential_forwarding == "stripped"
+
+
 def test_capture_enforces_response_read_and_storage_bounds(monkeypatch):
     def handler(_incoming: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"x" * 100_000)
@@ -163,3 +186,100 @@ def test_capture_enforces_response_read_and_storage_bounds(monkeypatch):
     assert len(sampled.content) == 64 * 1024
     assert none.content == b""
     assert none.body_digest_complete is True
+
+
+def test_capture_hashes_compressed_transfer_bytes_without_decompression(monkeypatch):
+    compressed = gzip.compress(b"x" * 1_000_000)
+
+    def handler(_incoming: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-encoding": "gzip"},
+            stream=httpx.ByteStream(compressed),
+        )
+
+    with mock_transport(monkeypatch, "isolated", handler) as transport:
+        captured = transport.capture(
+            request(),
+            "https://example.test",
+            "control",
+            max_response_bytes=4096,
+            body_storage="full",
+        )
+
+    assert len(compressed) < 4096
+    assert captured.response_limit_exceeded is False
+    assert captured.body_length == len(compressed)
+    assert captured.content == compressed
+    assert captured.body_sha256 == hashlib.sha256(compressed).hexdigest()
+
+
+def test_connection_modes_create_the_declared_pool_scopes(monkeypatch):
+    def exercise(mode: str) -> int:
+        created = 0
+        transport = SemanticHttpTransport(
+            SendOptions(),
+            state_mode="isolated",
+            connection_mode=mode,
+        )
+
+        def new_client():
+            nonlocal created
+            created += 1
+            return httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda _incoming: httpx.Response(200, content=b"ok")
+                )
+            )
+
+        monkeypatch.setattr(transport, "_new_client", new_client)
+        with transport:
+            for round_index, arm in ((1, "control"), (1, "mutation"), (2, "control")):
+                captured = transport.capture(
+                    request(),
+                    "https://example.test",
+                    arm,
+                    round_index=round_index,
+                    max_response_bytes=1024,
+                    body_storage="full",
+                )
+                assert captured.http_version == "HTTP/1.1"
+                if mode == "per-round" and arm == "mutation":
+                    transport.complete_round(round_index)
+        return created
+
+    assert exercise("reuse") == 1
+    assert exercise("per-arm") == 2
+    assert exercise("per-round") == 2
+    assert exercise("fresh-observation") == 3
+
+
+def test_fresh_connections_can_preserve_explicit_shared_cookie_state(monkeypatch):
+    observed: list[str | None] = []
+    transport = SemanticHttpTransport(
+        SendOptions(),
+        state_mode="shared-session",
+        connection_mode="fresh-observation",
+    )
+
+    def handler(incoming: httpx.Request) -> httpx.Response:
+        observed.append(incoming.headers.get("cookie"))
+        return httpx.Response(200, headers={"set-cookie": "session=shared"}, content=b"ok")
+
+    monkeypatch.setattr(
+        transport,
+        "_new_client",
+        lambda: httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with transport:
+        for arm in ("control", "mutation"):
+            transport.capture(
+                request(),
+                "https://example.test",
+                arm,
+                round_index=1,
+                max_response_bytes=1024,
+                body_storage="full",
+            )
+
+    assert observed == [None, "session=shared"]

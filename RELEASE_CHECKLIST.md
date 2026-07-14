@@ -20,9 +20,11 @@
 - [ ] `mrma config --json` works
 - [ ] `mrma run --url https://example.com --follow-redirects` works
 - [ ] `mrma experiment` detects a deterministic local mutation
-- [ ] `mrma experiment --json` emits schema-valid `mrma.experiment/v2` without decoration
+- [ ] `mrma experiment --json` emits schema-valid `mrma.experiment/v3` without decoration
 - [ ] cookie state does not cross observations in default isolated mode
 - [ ] response limits and transport failures produce typed evidence instead of crashes
+- [ ] redirect and retry traces affect verdicts when final responses are identical
+- [ ] every connection mode passes its state and pool-isolation tests
 - [ ] exit codes `10` and `11` match the documented `--fail-on` policy
 - [ ] unstable local controls produce `INCONCLUSIVE`
 - [ ] `mrma impact --url https://example.com --follow-redirects --top-deltas 5` works
@@ -33,3 +35,5 @@
 - [ ] Authorized-use note present
 - [ ] Transport mode and limitations are stated
 - [ ] Result dimensions are not presented as severity or exploitability
+- [ ] release tag is cut only after all quality, CodeQL, and container checks pass on its commit
+- [ ] base image digest and hash-locked container requirements are current and reviewed

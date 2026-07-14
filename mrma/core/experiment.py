@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import math
 import random
 import secrets
@@ -22,7 +23,7 @@ from .compare import (
 from .http_client import CapturedResponse, RedirectHop
 from .privacy import EvidenceRedactor
 from .raw_request import RawRequest
-from .sender import SendOutcome
+from .sender import AttemptRecord, SendOutcome
 
 HTTP_RESPONSE = "HTTP_RESPONSE"
 TIMEOUT = "TIMEOUT"
@@ -77,6 +78,7 @@ class ExperimentConfig:
     seed: int | None = None
     schedule_mode: str = "bracketed"
     state_mode: str = "isolated"
+    connection_mode: str = "reuse"
     max_response_bytes: int = 1024 * 1024
     body_storage: str = "sample"
     redactor: EvidenceRedactor = field(default_factory=EvidenceRedactor, repr=False)
@@ -85,6 +87,35 @@ class ExperimentConfig:
         if self.rounds is not None:
             return self.rounds, self.rounds
         return self.min_rounds, self.max_rounds
+
+
+@dataclass(frozen=True)
+class AttemptEvidence:
+    attempt: int
+    outcome: str
+    status: int | None
+    elapsed_ms: float
+    retry_reason: str | None
+    backoff_ms: float | None
+    error_type: str | None = None
+
+    def signature(self) -> tuple[object, ...]:
+        return (self.outcome, self.status, self.retry_reason)
+
+    def to_dict(self, redactor: EvidenceRedactor) -> dict[str, object]:
+        return {
+            "attempt": self.attempt,
+            "outcome": self.outcome,
+            "status": self.status,
+            "elapsed": redactor.elapsed_ms(self.elapsed_ms),
+            "retry_reason": self.retry_reason,
+            "backoff": (
+                redactor.elapsed_ms(self.backoff_ms)
+                if self.backoff_ms is not None
+                else None
+            ),
+            "error_type": self.error_type,
+        }
 
 
 @dataclass
@@ -102,9 +133,11 @@ class Observation:
     attempts: int
     headers: dict[str, tuple[str, ...]]
     body: bytes = field(repr=False)
+    attempt_trace: tuple[AttemptEvidence, ...] = ()
     error_type: str | None = None
     redirect_chain: tuple[RedirectHop, ...] = ()
     final_origin: str | None = None
+    http_version: str | None = None
 
     def to_dict(self, redactor: EvidenceRedactor) -> dict[str, object]:
         header_fingerprints: dict[str, list[dict[str, object]]] = {}
@@ -135,6 +168,9 @@ class Observation:
             "body_comparator_eligible": _body_comparator_eligible(self),
             "elapsed": redactor.elapsed_ms(self.elapsed_ms),
             "attempts": self.attempts,
+            "attempt_trace": [
+                attempt.to_dict(redactor) for attempt in self.attempt_trace
+            ],
             "evidence_header_fingerprints": header_fingerprints,
         }
         if self.error_type:
@@ -147,6 +183,7 @@ class Observation:
                     "status": hop.status,
                     "method": hop.method,
                     "origin": redactor.origin(hop.origin),
+                    "target_origin": redactor.origin(hop.target_origin),
                     "location_fingerprint": (
                         redactor.fingerprint(hop.location, label="redirect-location")
                         if hop.location is not None
@@ -154,9 +191,12 @@ class Observation:
                     ),
                     "cross_origin": hop.cross_origin,
                     "method_changed": hop.method_changed,
+                    "credential_forwarding": hop.credential_forwarding,
                 }
                 for hop in self.redirect_chain
             ]
+        if self.http_version:
+            payload["http_version"] = self.http_version
         return payload
 
 
@@ -167,9 +207,13 @@ class PairEvidence:
     status_changed: bool
     body_changed: bool | None
     outcome_changed: bool
+    redirect_changed: bool
+    retry_changed: bool
     similarity: float | None
     length_delta_ratio: float | None
     header_diffs: tuple[str, ...]
+    redirect_diffs: tuple[str, ...]
+    attempt_diffs: tuple[str, ...]
     comparator: str
 
     @property
@@ -187,9 +231,13 @@ class PairEvidence:
             "status_changed": self.status_changed,
             "body_changed": self.body_changed,
             "outcome_changed": self.outcome_changed,
+            "redirect_changed": self.redirect_changed,
+            "retry_changed": self.retry_changed,
             "similarity": self.similarity,
             "length_delta_ratio": self.length_delta_ratio,
             "header_diffs": [redactor.header_name(name) for name in self.header_diffs],
+            "redirect_diffs": list(self.redirect_diffs),
+            "attempt_diffs": list(self.attempt_diffs),
             "comparator": self.comparator,
         }
 
@@ -216,6 +264,8 @@ class ExperimentResult:
     similarity_contrast: float | None
     status_shift_rounds: int
     outcome_shift_rounds: int
+    redirect_shift_rounds: int
+    retry_shift_rounds: int
     header_shift_counts: dict[str, int]
     outcome_counts: dict[str, int]
     reasons: list[str]
@@ -226,6 +276,12 @@ class ExperimentResult:
 
     def to_dict(self) -> dict[str, object]:
         redactor = self.config.redactor
+        _, planned_rounds = self.config.round_limits()
+        planned_control_comparisons = (
+            planned_rounds
+            if self.config.schedule_mode == "bracketed"
+            else max(planned_rounds - 1, 0)
+        )
         public_policy = self.effective_policy.to_dict()
         public_policy["ignore_headers"] = [
             redactor.header_name(name) for name in self.effective_policy.ignore_headers
@@ -243,7 +299,8 @@ class ExperimentResult:
             "evidence_grade": self.evidence_grade,
             "stop_reason": self.stop_reason,
             "design": {
-                "rounds": self.rounds,
+                "planned_rounds": planned_rounds,
+                "completed_rounds": self.rounds,
                 "schedule": (
                     "locally bracketed C-before/M/C-after"
                     if self.config.schedule_mode == "bracketed"
@@ -257,8 +314,16 @@ class ExperimentResult:
                 ),
                 "control_comparisons": self.control_comparisons,
                 "state_mode": self.config.state_mode,
+                "connection_mode": self.config.connection_mode,
                 "body_storage": self.config.body_storage,
                 "max_response_bytes": self.config.max_response_bytes,
+                "operating_characteristics": operating_characteristics(
+                    planned_rounds,
+                    self.config.min_reproducibility,
+                    self.config.no_influence_threshold,
+                    self.config.max_control_change_rate,
+                    planned_control_comparisons,
+                ),
             },
             "effective_equivalence_policy": public_policy,
             "reproducibility": {
@@ -279,12 +344,15 @@ class ExperimentResult:
                 "control_minus_mutation_similarity": self.similarity_contrast,
                 "status_shift_rounds": self.status_shift_rounds,
                 "outcome_shift_rounds": self.outcome_shift_rounds,
+                "redirect_shift_rounds": self.redirect_shift_rounds,
+                "retry_shift_rounds": self.retry_shift_rounds,
                 "response_header_shift_counts": {
                     redactor.header_name(name): count
                     for name, count in self.header_shift_counts.items()
                 },
                 "outcome_counts": self.outcome_counts,
             },
+            "evidence_dimensions": _evidence_dimensions(self),
             "reasons": self.reasons,
             "round_evidence": [pair.to_dict(redactor) for pair in self.pairs],
             "observations": [item.to_dict(redactor) for item in self.observations],
@@ -303,6 +371,43 @@ def wilson_interval(successes: int, total: int, z: float = 1.96) -> tuple[float,
     lower = 0.0 if successes == 0 else max(0.0, (centre - margin) / denominator)
     upper = 1.0 if successes == total else min(1.0, (centre + margin) / denominator)
     return (lower, upper)
+
+
+def operating_characteristics(
+    rounds: int,
+    influence_threshold: float,
+    no_influence_threshold: float,
+    control_threshold: float,
+    control_comparisons: int | None = None,
+) -> dict[str, int | float | None]:
+    """Return the predeclared fixed-sample counts capable of decisive bounds."""
+    positive = next(
+        (
+            changed
+            for changed in range(rounds + 1)
+            if wilson_interval(changed, rounds)[0] >= influence_threshold
+        ),
+        None,
+    )
+    negative_values = [
+        changed
+        for changed in range(rounds + 1)
+        if wilson_interval(changed, rounds)[1] <= no_influence_threshold
+    ]
+    control_total = rounds if control_comparisons is None else control_comparisons
+    stable_control_values = [
+        changed
+        for changed in range(control_total + 1)
+        if wilson_interval(changed, control_total)[1] <= control_threshold
+    ]
+    return {
+        "rounds": rounds,
+        "control_comparisons": control_total,
+        "confidence": 0.95,
+        "positive_min_changed": positive,
+        "negative_max_changed": max(negative_values) if negative_values else None,
+        "control_max_changed": max(stable_control_values) if stable_control_values else None,
+    }
 
 
 def _header_items(headers: object) -> Iterable[tuple[str, str]]:
@@ -352,29 +457,79 @@ def classify_transport_error(exc: BaseException) -> str:
     return TRANSPORT_ERROR
 
 
+def _attempt_from_record(record: AttemptRecord) -> AttemptEvidence:
+    response = record.response
+    error = record.error
+    if error is not None or response is None:
+        outcome = classify_transport_error(error or RuntimeError("missing response"))
+        status = None
+    else:
+        captured = response if isinstance(response, CapturedResponse) else None
+        outcome = POLICY_ABORT if captured and captured.response_limit_exceeded else HTTP_RESPONSE
+        status = int(getattr(response, "status_code"))
+    return AttemptEvidence(
+        attempt=record.attempt,
+        outcome=outcome,
+        status=status,
+        elapsed_ms=record.elapsed_ms,
+        retry_reason=record.retry_reason,
+        backoff_ms=record.backoff_ms,
+        error_type=type(error).__name__ if error is not None else None,
+    )
+
+
+def _sender_supports_context(sender: Callable[..., object]) -> bool:
+    try:
+        parameters = inspect.signature(sender).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters) or {
+        "round_index",
+        "sequence",
+    }.issubset(parameter.name for parameter in parameters)
+
+
 def _observe(
     arm: str,
     round_index: int,
     sequence: int,
     req: RawRequest,
-    sender: Callable[[str, RawRequest], object],
+    sender: Callable[..., object],
     policy: EffectiveEquivalencePolicy,
+    sender_supports_context: bool,
 ) -> Observation:
     started = time.perf_counter()
     attempts = 1
     response: object | None = None
     error: BaseException | None = None
+    attempt_trace: tuple[AttemptEvidence, ...] = ()
     try:
-        sent = sender(arm, req)
+        sent = (
+            sender(arm, req, round_index=round_index, sequence=sequence)
+            if sender_supports_context
+            else sender(arm, req)
+        )
         if isinstance(sent, SendOutcome):
             attempts = sent.attempts
             response = sent.response
             error = sent.error
+            attempt_trace = tuple(_attempt_from_record(item) for item in sent.attempt_trace)
         else:
             response = sent
     except Exception as exc:
         error = exc
     elapsed_ms = (time.perf_counter() - started) * 1000
+
+    if not attempt_trace:
+        synthetic = AttemptRecord(
+            attempt=attempts,
+            response=response,
+            error=error if isinstance(error, Exception) else None,
+            elapsed_ms=round(elapsed_ms, 3),
+            retry_reason=None,
+            backoff_ms=None,
+        )
+        attempt_trace = (_attempt_from_record(synthetic),)
 
     if error is not None or response is None:
         outcome = classify_transport_error(error or RuntimeError("missing response"))
@@ -392,6 +547,7 @@ def _observe(
             attempts=attempts,
             headers={},
             body=b"",
+            attempt_trace=attempt_trace,
             error_type=type(error).__name__ if error is not None else "MissingResponse",
         )
 
@@ -416,15 +572,108 @@ def _observe(
         attempts=attempts,
         headers=_normalized_headers(getattr(response, "headers", ()), set(policy.ignore_headers)),
         body=body,
+        attempt_trace=attempt_trace,
         error_type="ResponseLimitExceeded" if outcome == POLICY_ABORT else None,
         redirect_chain=captured.redirect_chain if captured else (),
         final_origin=captured.final_origin if captured else None,
+        http_version=captured.http_version if captured else None,
     )
 
 
 def _header_diffs(a: Observation, b: Observation) -> tuple[str, ...]:
     names = set(a.headers) | set(b.headers)
-    return tuple(sorted(name for name in names if a.headers.get(name) != b.headers.get(name)))
+    return tuple(
+        sorted(
+            name
+            for name in names
+            if _canonical_header_values(name, a.headers.get(name, ()))
+            != _canonical_header_values(name, b.headers.get(name, ()))
+        )
+    )
+
+
+def _canonical_header_values(name: str, values: tuple[str, ...]) -> tuple[str, ...]:
+    if name == "vary":
+        tokens = {
+            token.strip().lower()
+            for value in values
+            for token in value.split(",")
+            if token.strip()
+        }
+        return tuple(sorted(tokens))
+    return values
+
+
+def _redirect_diffs(a: Observation, b: Observation) -> tuple[str, ...]:
+    fields: tuple[tuple[str, object, object], ...] = (
+        ("hop-count", len(a.redirect_chain), len(b.redirect_chain)),
+        (
+            "status-sequence",
+            tuple(hop.status for hop in a.redirect_chain),
+            tuple(hop.status for hop in b.redirect_chain),
+        ),
+        (
+            "method-sequence",
+            tuple(hop.method for hop in a.redirect_chain),
+            tuple(hop.method for hop in b.redirect_chain),
+        ),
+        (
+            "origin-sequence",
+            tuple(hop.origin for hop in a.redirect_chain),
+            tuple(hop.origin for hop in b.redirect_chain),
+        ),
+        (
+            "target-origin-sequence",
+            tuple(hop.target_origin for hop in a.redirect_chain),
+            tuple(hop.target_origin for hop in b.redirect_chain),
+        ),
+        (
+            "location-sequence",
+            tuple(hop.location for hop in a.redirect_chain),
+            tuple(hop.location for hop in b.redirect_chain),
+        ),
+        (
+            "cross-origin-transitions",
+            tuple(hop.cross_origin for hop in a.redirect_chain),
+            tuple(hop.cross_origin for hop in b.redirect_chain),
+        ),
+        (
+            "method-transformations",
+            tuple(hop.method_changed for hop in a.redirect_chain),
+            tuple(hop.method_changed for hop in b.redirect_chain),
+        ),
+        (
+            "credential-forwarding",
+            tuple(hop.credential_forwarding for hop in a.redirect_chain),
+            tuple(hop.credential_forwarding for hop in b.redirect_chain),
+        ),
+        ("final-origin", a.final_origin, b.final_origin),
+    )
+    return tuple(name for name, left, right in fields if left != right)
+
+
+def _attempt_diffs(a: Observation, b: Observation) -> tuple[str, ...]:
+    intermediate_a = a.attempt_trace[:-1]
+    intermediate_b = b.attempt_trace[:-1]
+    fields: tuple[tuple[str, object, object], ...] = (
+        ("attempt-count", a.attempts, b.attempts),
+        (
+            "outcome-sequence",
+            tuple(item.outcome for item in intermediate_a),
+            tuple(item.outcome for item in intermediate_b),
+        ),
+        (
+            "status-sequence",
+            tuple(item.status for item in intermediate_a),
+            tuple(item.status for item in intermediate_b),
+        ),
+        (
+            "retry-reason-sequence",
+            tuple(item.retry_reason for item in intermediate_a),
+            tuple(item.retry_reason for item in intermediate_b),
+        ),
+    )
+    return tuple(name for name, left, right in fields if left != right)
 
 
 def _body_comparator_eligible(observation: Observation) -> bool:
@@ -457,11 +706,15 @@ def _compare(
     policy: EffectiveEquivalencePolicy,
 ) -> PairEvidence:
     header_diffs = _header_diffs(a, b)
+    redirect_diffs = _redirect_diffs(a, b)
+    attempt_diffs = _attempt_diffs(a, b)
     status_changed = a.status != b.status
     outcome_changed = a.outcome != b.outcome
+    redirect_changed = bool(redirect_diffs)
+    retry_changed = bool(attempt_diffs)
     decisive_change = outcome_changed or (status_changed and policy.require_same_status) or bool(
         header_diffs
-    )
+    ) or redirect_changed or retry_changed
 
     if a.outcome != HTTP_RESPONSE or b.outcome != HTTP_RESPONSE:
         return PairEvidence(
@@ -470,9 +723,13 @@ def _compare(
             status_changed=status_changed,
             body_changed=None,
             outcome_changed=outcome_changed,
+            redirect_changed=redirect_changed,
+            retry_changed=retry_changed,
             similarity=None,
             length_delta_ratio=None,
             header_diffs=header_diffs,
+            redirect_diffs=redirect_diffs,
+            attempt_diffs=attempt_diffs,
             comparator="outcome",
         )
 
@@ -489,9 +746,13 @@ def _compare(
             status_changed=status_changed,
             body_changed=body_changed,
             outcome_changed=outcome_changed,
+            redirect_changed=redirect_changed,
+            retry_changed=retry_changed,
             similarity=round(comparison.sim, 6),
             length_delta_ratio=round(length_delta_ratio, 6),
             header_diffs=header_diffs,
+            redirect_diffs=redirect_diffs,
+            attempt_diffs=attempt_diffs,
             comparator=comparison.comparator,
         )
 
@@ -513,6 +774,8 @@ def _compare(
         status_changed=status_changed,
         body_changed=False if exact_digest_match else None,
         outcome_changed=outcome_changed,
+        redirect_changed=redirect_changed,
+        retry_changed=retry_changed,
         similarity=1.0 if exact_digest_match else None,
         length_delta_ratio=(
             round(abs(b.length - a.length) / max(a.length, 1), 6)
@@ -520,6 +783,8 @@ def _compare(
             else None
         ),
         header_diffs=header_diffs,
+        redirect_diffs=redirect_diffs,
+        attempt_diffs=attempt_diffs,
         comparator="exact-digest" if exact_digest_match else "bounded-incomplete",
     )
 
@@ -531,6 +796,8 @@ def _combine_bracket(
     after_mutation: PairEvidence,
 ) -> PairEvidence:
     mutation_diffs = set(before_mutation.header_diffs) & set(after_mutation.header_diffs)
+    redirect_diffs = set(before_mutation.redirect_diffs) & set(after_mutation.redirect_diffs)
+    attempt_diffs = set(before_mutation.attempt_diffs) & set(after_mutation.attempt_diffs)
     if control_pair.classification != PAIR_UNCHANGED:
         classification = PAIR_INDETERMINATE
     elif before_mutation.changed and after_mutation.changed:
@@ -565,9 +832,13 @@ def _combine_bracket(
             else None
         ),
         outcome_changed=before_mutation.outcome_changed and after_mutation.outcome_changed,
+        redirect_changed=before_mutation.redirect_changed and after_mutation.redirect_changed,
+        retry_changed=before_mutation.retry_changed and after_mutation.retry_changed,
         similarity=max(similarities) if similarities else None,
         length_delta_ratio=min(length_deltas) if length_deltas else None,
         header_diffs=tuple(sorted(mutation_diffs)),
+        redirect_diffs=tuple(sorted(redirect_diffs)),
+        attempt_diffs=tuple(sorted(attempt_diffs)),
         comparator=f"bracketed:{before_mutation.comparator}/{after_mutation.comparator}",
     )
 
@@ -583,6 +854,68 @@ def _evidence_grade(verdict: str, observations: list[Observation]) -> str:
     if any(item.outcome != HTTP_RESPONSE for item in observations):
         return "moderate"
     return "strong"
+
+
+def _evidence_dimensions(result: ExperimentResult) -> dict[str, object]:
+    effects: list[str] = []
+    if result.status_shift_rounds:
+        effects.append("status")
+    if any(pair.body_changed is True for pair in result.pairs):
+        effects.append("body")
+    if result.header_shift_counts:
+        effects.append("response-header")
+    if result.outcome_shift_rounds:
+        effects.append("transport-outcome")
+    if result.redirect_shift_rounds:
+        effects.append("redirect-trace")
+    if result.retry_shift_rounds:
+        effects.append("retry-trace")
+    has_transport_outcome = any(item.outcome != HTTP_RESPONSE for item in result.observations)
+    controls_complete = all(
+        item.outcome == HTTP_RESPONSE
+        for item in result.observations
+        if item.arm.startswith("control")
+    )
+    has_incomplete_body = any(
+        not item.body_digest_complete or not item.body_retained_complete
+        for item in result.observations
+    )
+    normalization_risk = (
+        "elevated"
+        if result.effective_policy.ignore_headers
+        or result.effective_policy.ignore_body_regex
+        or result.effective_policy.preset != "default"
+        else "low"
+    )
+    return {
+        "statistical_decisiveness": (
+            "decisive" if result.verdict != "INCONCLUSIVE" else "inconclusive"
+        ),
+        "control_stability": (
+            "stable"
+            if controls_complete
+            and result.control_change_interval_95[1]
+            <= result.config.max_control_change_rate
+            and result.control_indeterminate == 0
+            else "unstable-or-insufficient"
+        ),
+        "transport_completeness": (
+            "typed-failure"
+            if has_transport_outcome
+            else "bounded"
+            if has_incomplete_body
+            else "complete"
+        ),
+        "state_isolation": result.config.state_mode,
+        "connection_isolation": result.config.connection_mode,
+        "normalization_risk": normalization_risk,
+        "effect_types": effects,
+        "reproduction_completeness": (
+            "complete"
+            if result.mutation_indeterminate == 0
+            else "contains-indeterminate-rounds"
+        ),
+    }
 
 
 def analyze_experiment(
@@ -683,6 +1016,8 @@ def analyze_experiment(
         outcome_counts[item.outcome] = outcome_counts.get(item.outcome, 0) + 1
     status_shift_rounds = sum(pair.status_changed for pair in pairs)
     outcome_shift_rounds = sum(pair.outcome_changed for pair in pairs)
+    redirect_shift_rounds = sum(pair.redirect_changed for pair in pairs)
+    retry_shift_rounds = sum(pair.retry_changed for pair in pairs)
     reasons = [
         f"{mutation_changes}/{len(pairs)} mutation pairs were classified as changed",
         f"mutation 95% interval is {mutation_interval[0]:.1%}-{mutation_interval[1]:.1%}",
@@ -727,6 +1062,8 @@ def analyze_experiment(
         similarity_contrast=similarity_contrast,
         status_shift_rounds=status_shift_rounds,
         outcome_shift_rounds=outcome_shift_rounds,
+        redirect_shift_rounds=redirect_shift_rounds,
+        retry_shift_rounds=retry_shift_rounds,
         header_shift_counts=header_shift_counts,
         outcome_counts=outcome_counts,
         reasons=reasons,
@@ -759,6 +1096,10 @@ def _validate_config(cfg: ExperimentConfig) -> tuple[int, int]:
         raise ValueError("balanced schedules require even min_rounds and max_rounds")
     if cfg.state_mode not in {"isolated", "per-arm", "shared-session"}:
         raise ValueError("state_mode must be isolated, per-arm, or shared-session")
+    if cfg.connection_mode not in {"reuse", "per-arm", "per-round", "fresh-observation"}:
+        raise ValueError(
+            "connection_mode must be reuse, per-arm, per-round, or fresh-observation"
+        )
     return min_rounds, max_rounds
 
 
@@ -775,7 +1116,7 @@ def _schedule_blocks(max_rounds: int, seed: int) -> list[tuple[str, ...]]:
 def run_experiment(
     baseline_req: RawRequest,
     mutated_req: RawRequest,
-    sender: Callable[[str, RawRequest], object],
+    sender: Callable[..., object],
     cfg: ExperimentConfig,
     on_progress: Callable[[int, int, str], None] | None = None,
 ) -> ExperimentResult:
@@ -791,13 +1132,22 @@ def run_experiment(
     observations: list[Observation] = []
     sequence = 0
     result: ExperimentResult | None = None
+    sender_supports_context = _sender_supports_context(sender)
 
     for round_index, order in enumerate(full_schedule, start=1):
         for arm in order:
             sequence += 1
             request = mutated_req if arm == "mutation" else baseline_req
             observations.append(
-                _observe(arm, round_index, sequence, request, sender, policy)
+                _observe(
+                    arm,
+                    round_index,
+                    sequence,
+                    request,
+                    sender,
+                    policy,
+                    sender_supports_context,
+                )
             )
             if on_progress is not None:
                 on_progress(sequence, max_rounds * len(order), arm)

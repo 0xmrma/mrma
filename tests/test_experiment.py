@@ -1,3 +1,4 @@
+import hashlib
 from dataclasses import replace
 
 import httpx
@@ -11,12 +12,14 @@ from mrma.core.experiment import (
     TIMEOUT,
     ExperimentConfig,
     classify_transport_error,
+    operating_characteristics,
     run_experiment,
     wilson_interval,
 )
-from mrma.core.http_client import CapturedResponse
+from mrma.core.http_client import CapturedResponse, RedirectHop
+from mrma.core.privacy import EvidenceRedactor
 from mrma.core.raw_request import RawRequest
-from mrma.core.sender import SendOutcome
+from mrma.core.sender import AttemptRecord, SendOutcome
 
 
 class MultiHeaders:
@@ -142,6 +145,112 @@ def test_header_only_influence_preserves_duplicate_values_without_exporting_them
     assert len(header_values) == 2
 
 
+def test_semantically_equivalent_vary_header_order_does_not_create_a_signal():
+    baseline, mutated = mutation_pair()
+
+    def sender(arm: str, _req: RawRequest) -> FakeResponse:
+        vary = (
+            MultiHeaders([("vary", "Origin"), ("vary", "Accept-Encoding")])
+            if arm == "mutation"
+            else MultiHeaders([("vary", "Accept-Encoding, Origin")])
+        )
+        return FakeResponse(b"same", vary)
+
+    result = run_experiment(
+        baseline,
+        mutated,
+        sender,
+        ExperimentConfig(rounds=20),
+    )
+
+    assert result.verdict == "NO_INFLUENCE_OBSERVED"
+    assert result.header_shift_counts == {}
+
+
+def test_redirect_trace_is_decision_bearing_when_final_responses_match():
+    baseline, mutated = mutation_pair()
+    body = b"same final page"
+    digest = hashlib.sha256(body).hexdigest()
+
+    def response(arm: str) -> CapturedResponse:
+        relay = "https://relay.test" if arm == "mutation" else "https://login.test"
+        return CapturedResponse(
+            status_code=200,
+            headers=(("content-type", "text/plain"),),
+            content=body,
+            body_length=len(body),
+            body_sha256=digest,
+            body_digest_complete=True,
+            body_retained_complete=True,
+            response_limit_exceeded=False,
+            redirect_chain=(
+                RedirectHop(
+                    status=302,
+                    method="GET",
+                    origin="https://entry.test",
+                    target_origin=relay,
+                    location=f"{relay}/next",
+                    cross_origin=True,
+                    method_changed=False,
+                    credential_forwarding="stripped",
+                ),
+            ),
+            final_origin="https://login.test",
+            http_version="HTTP/2",
+        )
+
+    result = run_experiment(
+        baseline,
+        mutated,
+        lambda arm, _req: response(arm),
+        ExperimentConfig(rounds=20),
+    )
+    exported = result.to_dict()
+
+    assert result.verdict == "INFLUENCE_DETECTED"
+    assert result.redirect_shift_rounds == result.rounds
+    assert set(result.pairs[0].redirect_diffs) == {
+        "location-sequence",
+        "target-origin-sequence",
+    }
+    assert exported["effect"]["redirect_shift_rounds"] == 20
+    assert exported["observations"][1]["redirect_chain"][0][
+        "location_fingerprint"
+    ].startswith("hmac-sha256:")
+
+
+def test_mutation_only_intermediate_retries_are_decision_bearing():
+    baseline, mutated = mutation_pair()
+
+    def outcome(statuses: list[int]) -> SendOutcome:
+        responses = [FakeResponse(b"same", status=status) for status in statuses]
+        trace = tuple(
+            AttemptRecord(
+                attempt=index,
+                response=response,
+                error=None,
+                elapsed_ms=10.0,
+                retry_reason="configured-status" if index < len(responses) else None,
+                backoff_ms=400.0 if index < len(responses) else None,
+            )
+            for index, response in enumerate(responses, start=1)
+        )
+        return SendOutcome(responses[-1], None, len(responses), trace)
+
+    result = run_experiment(
+        baseline,
+        mutated,
+        lambda arm, _req: outcome([503, 503, 200] if arm == "mutation" else [200]),
+        ExperimentConfig(rounds=20),
+    )
+
+    assert result.verdict == "INFLUENCE_DETECTED"
+    assert result.retry_shift_rounds == result.rounds
+    assert "attempt-count" in result.pairs[0].attempt_diffs
+    mutation = next(item for item in result.observations if item.arm == "mutation")
+    assert [item.status for item in mutation.attempt_trace] == [503, 503, 200]
+
+
 def test_preset_header_ignores_are_effective_in_the_experiment():
     baseline, mutated = mutation_pair()
     sequence = 0
@@ -192,6 +301,10 @@ def test_experiment_rejects_unstable_controls_early():
     assert result.verdict == "INCONCLUSIVE"
     assert result.stop_reason == "control_instability"
     assert result.control_change_interval_95[0] > 0.2
+    design = result.to_dict()["design"]
+    assert design["planned_rounds"] == 20
+    assert design["completed_rounds"] == result.rounds
+    assert design["operating_characteristics"]["rounds"] == 20
 
 
 def test_local_control_drift_cannot_be_misattributed_to_mutation():
@@ -384,6 +497,34 @@ def test_observation_export_records_http_outcome_and_hides_raw_body_hash():
     assert "sha256" not in exported
 
 
+def test_strict_observation_export_masks_all_response_header_names():
+    baseline, mutated = mutation_pair()
+    result = run_experiment(
+        baseline,
+        mutated,
+        lambda _arm, _req: FakeResponse(
+            b"same",
+            MultiHeaders(
+                [
+                    ("content-type", "text/plain"),
+                    ("server", "private-gateway"),
+                ]
+            ),
+        ),
+        ExperimentConfig(
+            rounds=6,
+            redactor=EvidenceRedactor(policy="strict", _key=b"a" * 32),
+        ),
+    )
+
+    exported = result.to_dict()["observations"][0]
+    names = exported["evidence_header_fingerprints"]
+    assert names
+    assert all(name.startswith("hmac-sha256:") for name in names)
+    assert "content-type" not in str(names)
+    assert "private-gateway" not in str(names)
+
+
 def test_experiment_requires_six_rounds():
     with pytest.raises(ValueError, match="6-50 rounds"):
         run_experiment(
@@ -397,6 +538,19 @@ def test_experiment_requires_six_rounds():
 def test_wilson_interval_contains_observed_rate():
     low, high = wilson_interval(4, 5)
     assert 0.0 < low < 0.8 < high < 1.0
+
+
+def test_default_operating_characteristics_are_explicit():
+    characteristics = operating_characteristics(20, 0.8, 0.2, 0.2, 20)
+
+    assert characteristics == {
+        "rounds": 20,
+        "control_comparisons": 20,
+        "confidence": 0.95,
+        "positive_min_changed": 20,
+        "negative_max_changed": 0,
+        "control_max_changed": 0,
+    }
 
 
 def test_nested_dns_error_is_classified_without_message_leakage():

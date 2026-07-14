@@ -16,10 +16,21 @@ class SendPolicy:
 
 
 @dataclass(frozen=True)
+class AttemptRecord:
+    attempt: int
+    response: object | None
+    error: Exception | None
+    elapsed_ms: float
+    retry_reason: str | None
+    backoff_ms: float | None
+
+
+@dataclass(frozen=True)
 class SendOutcome:
     response: object | None
     error: Exception | None
     attempts: int
+    attempt_trace: tuple[AttemptRecord, ...] = ()
 
     @property
     def succeeded(self) -> bool:
@@ -88,24 +99,73 @@ def send_with_policy_outcome(
     policy: SendPolicy,
     gate: RateGate | None = None,
 ) -> SendOutcome:
-    """Apply request policy and preserve the final response or transport exception as evidence."""
+    """Apply request policy and preserve every attempt as bounded experiment evidence."""
     if gate is None:
         gate = RateGate()
 
     retry_statuses = set(policy.retry_status)
     attempt = 0
+    trace: list[AttemptRecord] = []
     while True:
         gate.wait(policy)
         attempt += 1
+        started = time.perf_counter()
+        response: object | None = None
+        attempt_error: Exception | None = None
         try:
             response = send_once()
         except Exception as exc:
+            attempt_error = exc
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
             if attempt > policy.retries:
-                return SendOutcome(response=None, error=exc, attempts=attempt)
+                trace.append(
+                    AttemptRecord(
+                        attempt=attempt,
+                        response=None,
+                        error=exc,
+                        elapsed_ms=elapsed_ms,
+                        retry_reason=None,
+                        backoff_ms=None,
+                    )
+                )
+                return SendOutcome(
+                    response=None,
+                    error=exc,
+                    attempts=attempt,
+                    attempt_trace=tuple(trace),
+                )
+            retry_reason = "transport-error"
         else:
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
             code = getattr(response, "status_code", None)
             if attempt > policy.retries or code not in retry_statuses:
-                return SendOutcome(response=response, error=None, attempts=attempt)
+                trace.append(
+                    AttemptRecord(
+                        attempt=attempt,
+                        response=response,
+                        error=None,
+                        elapsed_ms=elapsed_ms,
+                        retry_reason=None,
+                        backoff_ms=None,
+                    )
+                )
+                return SendOutcome(
+                    response=response,
+                    error=None,
+                    attempts=attempt,
+                    attempt_trace=tuple(trace),
+                )
+            retry_reason = "configured-status"
 
         backoff = min(policy.backoff_cap_s, policy.backoff_base_s * (2 ** (attempt - 1)))
+        trace.append(
+            AttemptRecord(
+                attempt=attempt,
+                response=response,
+                error=attempt_error,
+                elapsed_ms=elapsed_ms,
+                retry_reason=retry_reason,
+                backoff_ms=round(backoff * 1000, 3),
+            )
+        )
         time.sleep(backoff)

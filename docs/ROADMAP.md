@@ -26,6 +26,15 @@ adding more mutation families.
 - [x] Stable automation exit codes and `mrma.experiment/v2` JSON Schema
 - [x] Loopback integration tests and built-distribution release gates
 
+## 0.3.2 - Evidence contract completion
+
+- [x] Decision-bearing redirect traces and complete retry-attempt evidence
+- [x] Reusable, per-arm, per-round, and fresh-observation connection scopes
+- [x] Privacy-aware run timestamps and duration buckets
+- [x] Strict nested `mrma.experiment/v3` schema with v2 compatibility preservation
+- [x] Fixed-sample operating-characteristic preview and evidence dimensions
+- [x] Digest-pinned base image and hash-locked container dependencies
+
 ## 0.4 - One experiment oracle
 
 - Integrate repeated controls into impact, profiles, discovery, and isolation
@@ -47,7 +56,7 @@ adding more mutation families.
 
 - Separate semantic HTTP, wire-accurate HTTP/1.1, and HTTP/2 transports
 - Preserve binary bodies and duplicate-header semantics
-- Add connection-affinity and fresh-connection experiment modes
+- Add protocol-native HTTP/2 stream and connection-affinity controls
 - Compare CDN/origin and gateway/backend paths where the operator supplies both authorized routes
 - Add protocol-aware mutation grammars with conservative safety classifications
 

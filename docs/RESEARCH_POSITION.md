@@ -38,8 +38,9 @@ MRMA should treat every finding as an experiment, not an anomaly row:
 7. Minimize the responsible input using the same repeated oracle.
 8. Export a versioned evidence object that another engineer can replay and audit.
 
-Version 0.3.1 implements steps 1-6 for a single mutation in `mrma experiment`, including explicit
-state modes, fixed-sample confidence decisions, typed transport outcomes, and bounded observations.
+Version 0.3.2 implements steps 1-6 for a single mutation in `mrma experiment`, including explicit
+state and connection modes, fixed-sample confidence decisions, decision-bearing redirect/retry
+traces, typed transport outcomes, and bounded observations.
 Existing isolation commands implement early forms of step 7 but do not yet use this oracle.
 
 ## Defensible differentiation

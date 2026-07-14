@@ -9,6 +9,7 @@ import httpx
 from .raw_request import RawRequest
 
 STATE_MODES = ("isolated", "per-arm", "shared-session")
+CONNECTION_MODES = ("reuse", "per-arm", "per-round", "fresh-observation")
 BODY_STORAGE_MODES = ("none", "sample", "full")
 SAMPLE_BODY_BYTES = 64 * 1024
 
@@ -25,9 +26,11 @@ class RedirectHop:
     status: int
     method: str
     origin: str
+    target_origin: str
     location: str | None
     cross_origin: bool
     method_changed: bool
+    credential_forwarding: str
 
 
 @dataclass(frozen=True)
@@ -42,21 +45,40 @@ class CapturedResponse:
     response_limit_exceeded: bool
     redirect_chain: tuple[RedirectHop, ...]
     final_origin: str
+    http_version: str | None = None
 
 
 class SemanticHttpTransport:
     """Reusable semantic HTTP transport with an explicit cookie-state model."""
 
-    def __init__(self, opts: SendOptions, state_mode: str = "shared-session") -> None:
+    def __init__(
+        self,
+        opts: SendOptions,
+        state_mode: str = "shared-session",
+        connection_mode: str = "reuse",
+    ) -> None:
         if state_mode not in STATE_MODES:
             raise ValueError(f"state_mode must be one of: {', '.join(STATE_MODES)}")
+        if connection_mode not in CONNECTION_MODES:
+            raise ValueError(
+                f"connection_mode must be one of: {', '.join(CONNECTION_MODES)}"
+            )
         self.opts = opts
         self.state_mode = state_mode
+        self.connection_mode = connection_mode
         self._clients: dict[str, httpx.Client] = {}
+        self._state_cookies: dict[str, httpx.Cookies] = {}
 
     def __enter__(self) -> SemanticHttpTransport:
-        keys = ("control", "mutation") if self.state_mode == "per-arm" else ("shared",)
+        keys: tuple[str, ...]
+        if self.connection_mode == "reuse":
+            keys = ("shared",)
+        elif self.connection_mode == "per-arm":
+            keys = ("control", "mutation")
+        else:
+            keys = ()
         self._clients = {key: self._new_client() for key in keys}
+        self._state_cookies = {}
         return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
@@ -73,31 +95,58 @@ class SemanticHttpTransport:
         for client in self._clients.values():
             client.close()
         self._clients = {}
+        self._state_cookies = {}
 
-    def _client_for(self, arm: str) -> httpx.Client:
-        if not self._clients:
-            raise RuntimeError("SemanticHttpTransport must be used as a context manager")
-        key = arm if self.state_mode == "per-arm" else "shared"
-        if key not in self._clients:
-            raise ValueError("arm must be 'control' or 'mutation' in per-arm mode")
-        return self._clients[key]
+    def _client_for(self, arm: str, round_index: int | None) -> tuple[httpx.Client, bool]:
+        if arm not in {"control", "mutation"}:
+            raise ValueError("arm must be 'control' or 'mutation'")
+        if self.connection_mode == "reuse":
+            return self._clients["shared"], False
+        if self.connection_mode == "per-arm":
+            return self._clients[arm], False
+        if self.connection_mode == "per-round":
+            if round_index is None:
+                raise ValueError("round_index is required for per-round connections")
+            key = f"round:{round_index}"
+            if key not in self._clients:
+                self._clients[key] = self._new_client()
+            return self._clients[key], False
+        return self._new_client(), True
 
-    def _before_observation(self, client: httpx.Client) -> None:
+    def _cookie_state_key(self, arm: str) -> str:
+        return arm if self.state_mode == "per-arm" else "shared"
+
+    def complete_round(self, round_index: int) -> None:
+        """Close a round-scoped pool as soon as its bracket has completed."""
+        if self.connection_mode != "per-round":
+            return
+        client = self._clients.pop(f"round:{round_index}", None)
+        if client is not None:
+            client.close()
+
+    def _before_observation(self, client: httpx.Client, arm: str) -> None:
+        client.cookies.clear()
+        if self.state_mode != "isolated":
+            stored = self._state_cookies.get(self._cookie_state_key(arm))
+            if stored is not None:
+                client.cookies.update(stored)
+
+    def _after_observation(self, client: httpx.Client, arm: str) -> None:
         if self.state_mode == "isolated":
             client.cookies.clear()
-
-    def _after_observation(self, client: httpx.Client) -> None:
-        if self.state_mode == "isolated":
-            client.cookies.clear()
+        else:
+            self._state_cookies[self._cookie_state_key(arm)] = httpx.Cookies(client.cookies)
 
     def send(self, req: RawRequest, base_url: str, arm: str = "control") -> httpx.Response:
         """Send a fully buffered response; retained for legacy non-experiment commands."""
-        client = self._client_for(arm)
-        self._before_observation(client)
+        client, close_after = self._client_for(arm, 0)
+        self._before_observation(client, arm)
         try:
             return _send(client, req, base_url)
         finally:
-            self._after_observation(client)
+            self._after_observation(client, arm)
+            if close_after:
+                client.close()
 
     def capture(
         self,
@@ -107,6 +156,7 @@ class SemanticHttpTransport:
         *,
         max_response_bytes: int,
         body_storage: str,
+        round_index: int | None = None,
     ) -> CapturedResponse:
         """Stream and bound one experiment response without retaining an unbounded body."""
         if max_response_bytes <= 0:
@@ -114,9 +164,9 @@ class SemanticHttpTransport:
         if body_storage not in BODY_STORAGE_MODES:
             raise ValueError(f"body_storage must be one of: {', '.join(BODY_STORAGE_MODES)}")
 
-        client = self._client_for(arm)
+        client, close_after = self._client_for(arm, round_index)
+        self._before_observation(client, arm)
         request = _build_request(client, req, base_url)
-        self._before_observation(client)
         response: httpx.Response | None = None
         try:
             response = client.send(request, stream=True)
@@ -124,7 +174,9 @@ class SemanticHttpTransport:
         finally:
             if response is not None:
                 response.close()
-            self._after_observation(client)
+            self._after_observation(client, arm)
+            if close_after:
+                client.close()
 
 
 def _merge_url(base_url: str, path: str) -> str:
@@ -168,17 +220,49 @@ def _redirect_chain(response: httpx.Response) -> tuple[RedirectHop, ...]:
     for index, item in enumerate(history):
         next_response = history[index + 1] if index + 1 < len(history) else response
         location = item.headers.get("location")
+        source_credentials = _credential_headers(item.request)
+        target_credentials = _credential_headers(next_response.request)
         hops.append(
             RedirectHop(
                 status=item.status_code,
                 method=item.request.method,
                 origin=_origin(item.request.url),
+                target_origin=_origin(next_response.request.url),
                 location=location,
                 cross_origin=_origin(item.request.url) != _origin(next_response.request.url),
                 method_changed=item.request.method != next_response.request.method,
+                credential_forwarding=_credential_forwarding(
+                    source_credentials,
+                    target_credentials,
+                ),
             )
         )
     return tuple(hops)
+
+
+def _credential_headers(request: httpx.Request) -> dict[str, tuple[str, ...]]:
+    evidence_names = {"authorization", "cookie", "proxy-authorization"}
+    selected: dict[str, list[str]] = {}
+    for name, value in request.headers.multi_items():
+        lowered = name.lower()
+        if lowered in evidence_names:
+            selected.setdefault(lowered, []).append(value)
+    return {name: tuple(values) for name, values in selected.items()}
+
+
+def _credential_forwarding(
+    source: dict[str, tuple[str, ...]],
+    target: dict[str, tuple[str, ...]],
+) -> str:
+    if not source and not target:
+        return "none"
+    if source == target:
+        return "retained"
+    if source and target.keys() < source.keys() and all(
+        target[name] == source[name] for name in target
+    ):
+        return "stripped"
+    return "changed"
 
 
 def _capture_response(
@@ -229,6 +313,7 @@ def _capture_response(
         response_limit_exceeded=limit_exceeded,
         redirect_chain=_redirect_chain(response),
         final_origin=_origin(response.request.url),
+        http_version=response.http_version or None,
     )
 
 

@@ -20,6 +20,13 @@ def test_retry_attempts_and_final_response_are_preserved(monkeypatch):
     assert outcome.succeeded is True
     assert outcome.attempts == 3
     assert outcome.response.status_code == 200
+    assert [item.response.status_code for item in outcome.attempt_trace] == [503, 503, 200]
+    assert [item.retry_reason for item in outcome.attempt_trace] == [
+        "configured-status",
+        "configured-status",
+        None,
+    ]
+    assert all(item.elapsed_ms >= 0 for item in outcome.attempt_trace)
 
 
 def test_retry_attempts_and_final_exception_are_preserved(monkeypatch):
@@ -36,3 +43,6 @@ def test_retry_attempts_and_final_exception_are_preserved(monkeypatch):
     assert outcome.succeeded is False
     assert outcome.attempts == 2
     assert isinstance(outcome.error, ConnectionResetError)
+    assert len(outcome.attempt_trace) == 2
+    assert outcome.attempt_trace[0].retry_reason == "transport-error"
+    assert outcome.attempt_trace[1].retry_reason is None
