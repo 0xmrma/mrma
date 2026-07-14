@@ -25,7 +25,7 @@ from .http_client import CapturedResponse, RedirectHop
 from .http_semantics import (
     canonical_header_values,
     canonical_uri,
-    content_type_media_type,
+    content_type_analysis,
     header_semantic_ambiguities,
 )
 from .privacy import EvidenceRedactor
@@ -78,6 +78,18 @@ EVIDENCE_RESPONSE_HEADERS = (
 BODY_SAFETY_HEADERS = ("content-type", "content-encoding")
 RESPONSE_HEADER_SCOPES = ("known", "explicit")
 _HEADER_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+CONTENT_TYPE_AMBIGUITY_REASONS = frozenset(
+    {
+        "multiple-values",
+        "malformed-quoted-string",
+        "malformed-media-type",
+        "missing-parameter-value",
+        "invalid-parameter-name",
+        "invalid-parameter-value",
+        "conflicting-duplicate-parameter",
+        "unsupported-charset",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -139,6 +151,13 @@ class AttemptEvidence:
         }
 
 
+@dataclass(frozen=True)
+class BodyComparatorEligibility:
+    eligible: bool
+    charset: str | None
+    reasons: tuple[str, ...] = ()
+
+
 @dataclass
 class Observation:
     arm: str
@@ -155,6 +174,8 @@ class Observation:
     headers: dict[str, tuple[str, ...]]
     body: bytes = field(repr=False)
     body_comparator_eligible: bool = False
+    body_comparator_charset: str | None = None
+    body_comparator_reasons: tuple[str, ...] = ()
     attempt_trace: tuple[AttemptEvidence, ...] = ()
     error_type: str | None = None
     redirect_chain: tuple[RedirectHop, ...] = ()
@@ -189,6 +210,8 @@ class Observation:
             "body_digest_complete": self.body_digest_complete,
             "body_retained_complete": self.body_retained_complete,
             "body_comparator_eligible": self.body_comparator_eligible,
+            "body_comparator_charset": self.body_comparator_charset,
+            "body_comparator_reasons": list(self.body_comparator_reasons),
             "elapsed": redactor.elapsed_ms(self.elapsed_ms),
             "attempts": self.attempts,
             "attempt_trace": [
@@ -615,6 +638,7 @@ def _observe(
             headers={},
             body=b"",
             body_comparator_eligible=False,
+            body_comparator_reasons=("non-http-outcome",),
             attempt_trace=attempt_trace,
             error_type=type(error).__name__ if error is not None else "MissingResponse",
         )
@@ -631,6 +655,12 @@ def _observe(
         set(policy.ignore_headers),
         evidence_names,
     )
+    body_eligibility = _body_comparator_eligibility(
+        headers,
+        body,
+        retained_complete,
+        assume_text_without_content_type,
+    )
     return Observation(
         arm=arm,
         round_index=round_index,
@@ -645,11 +675,9 @@ def _observe(
         attempts=attempts,
         headers=headers,
         body=body,
-        body_comparator_eligible=_body_comparator_eligible(
-            headers,
-            retained_complete,
-            assume_text_without_content_type,
-        ),
+        body_comparator_eligible=body_eligibility.eligible,
+        body_comparator_charset=body_eligibility.charset,
+        body_comparator_reasons=body_eligibility.reasons,
         attempt_trace=attempt_trace,
         error_type="ResponseLimitExceeded" if outcome == POLICY_ABORT else None,
         redirect_chain=captured.redirect_chain if captured else (),
@@ -821,23 +849,35 @@ def _timing_summary(
     }
 
 
-def _body_comparator_eligible(
+def _body_comparator_eligibility(
     headers: Mapping[str, tuple[str, ...]],
+    body: bytes,
     body_retained_complete: bool,
     assume_text_without_content_type: bool,
-) -> bool:
+) -> BodyComparatorEligibility:
+    reasons: list[str] = []
     if not body_retained_complete:
-        return False
+        reasons.append("body-not-retained")
     encodings = headers.get("content-encoding", ())
     if any(value.strip().lower() not in {"", "identity"} for value in encodings):
-        return False
+        reasons.append("unsupported-content-encoding")
+
     content_types = headers.get("content-type", ())
     if not content_types:
-        return assume_text_without_content_type
-    media_type = content_type_media_type(content_types)
-    if media_type is None:
-        return False
-    return (
+        if assume_text_without_content_type:
+            media_type = "text/plain"
+            charset = "utf-8"
+        else:
+            media_type = None
+            charset = None
+            reasons.append("missing-content-type")
+    else:
+        analysis = content_type_analysis(content_types)
+        reasons.extend(analysis.ambiguities)
+        media_type = analysis.media_type
+        charset = (analysis.charset or "utf-8") if media_type is not None else None
+
+    text_media_type = media_type is not None and (
         media_type.startswith("text/")
         or media_type.endswith(("+json", "+xml"))
         or media_type
@@ -849,6 +889,18 @@ def _body_comparator_eligible(
             "application/x-www-form-urlencoded",
         }
     )
+    if media_type is not None and not text_media_type:
+        reasons.append("unsupported-media-type")
+
+    unique_reasons = tuple(dict.fromkeys(reasons))
+    if unique_reasons or charset is None:
+        return BodyComparatorEligibility(False, None, unique_reasons)
+    decoder = "ascii" if charset == "us-ascii" else charset
+    try:
+        body.decode(decoder, errors="strict")
+    except UnicodeDecodeError:
+        return BodyComparatorEligibility(False, None, ("invalid-body-encoding",))
+    return BodyComparatorEligibility(True, charset)
 
 
 def _compare(
@@ -1231,17 +1283,37 @@ def _limitations(result: ExperimentResult) -> list[dict[str, str]]:
                 "Review the ordered response-header evidence and intermediary behavior.",
             )
         )
-    if any(
-        header_semantic_ambiguities("content-type", item.headers.get("content-type", ()))
-        for item in result.observations
-    ):
+    content_type_reasons = sorted(
+        {
+            reason
+            for item in result.observations
+            for reason in item.body_comparator_reasons
+            if reason in CONTENT_TYPE_AMBIGUITY_REASONS
+        }
+    )
+    if content_type_reasons:
         limitations.append(
             _limitation(
                 "AMBIGUOUS_CONTENT_TYPE",
                 "moderate",
                 "body_comparison",
-                "At least one response contained multiple or malformed Content-Type evidence.",
+                "Content-Type could not safely enable semantic body comparison: "
+                + ", ".join(content_type_reasons)
+                + ".",
                 "Resolve the origin or intermediary ambiguity before interpreting body semantics.",
+            )
+        )
+    if any(
+        "invalid-body-encoding" in item.body_comparator_reasons
+        for item in result.observations
+    ):
+        limitations.append(
+            _limitation(
+                "INVALID_DECLARED_BODY_ENCODING",
+                "moderate",
+                "body_comparison",
+                "At least one retained body was not valid under its declared text charset.",
+                "Correct the declared charset or compare the complete response digest only.",
             )
         )
     if result.config.assume_text_without_content_type:

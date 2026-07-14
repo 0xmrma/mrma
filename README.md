@@ -75,10 +75,11 @@ mrma experiment \
   --fail-on any-signal
 ```
 
-The output declares `mrma.experiment/v5`; exit code `10` means influence and `11` means
-inconclusive when selected by `--fail-on`. The strict v5 JSON Schema defines every nested evidence
-object and cross-field assurance invariant. Published v2, v3, and v4 schemas remain packaged and
-immutable for compatibility. The default exit code remains zero for all verdicts.
+The output declares `mrma.experiment/v6`; exit code `10` means influence and `11` means
+inconclusive when selected by `--fail-on`. The strict v6 JSON Schema defines every nested evidence
+object, body-comparator eligibility reason, and cross-field assurance invariant. Published v2
+through v5 schemas remain packaged and immutable for compatibility. The default exit code remains
+zero for all verdicts.
 The transport is labeled `semantic-http`; MRMA uses `httpx` and does not claim byte-for-byte HTTP/1
 wire reproduction.
 
@@ -86,9 +87,11 @@ Responses are streamed with a default 1 MiB read bound. `--body-storage sample` 
 KiB per observation. When full normalization cannot be performed, unequal digests are marked
 `INDETERMINATE`; they are never silently treated as equivalent. Encoded and non-text bodies use
 exact transfer-digest equality only until bounded, content-aware decoders are implemented.
-Responses without one unambiguous, well-formed `Content-Type` also use digest-only evidence by
-default. `--assume-text-without-content-type` is an explicit weaker assumption and emits a
-structured limitation.
+Responses without one unambiguous, fully parsed `Content-Type` also use digest-only evidence by
+default. Every parameter is validated, quoted delimiters and escapes are respected, conflicting
+duplicates are rejected, and only strictly decoded UTF-8 or US-ASCII bodies enter text comparison.
+`--assume-text-without-content-type` is an explicit weaker assumption and emits a structured
+limitation.
 
 Retries are disabled by default. When enabled, every intermediate attempt, outcome class,
 error subtype, retry-triggering status, backoff, and final result is recorded. Stable error-subtype

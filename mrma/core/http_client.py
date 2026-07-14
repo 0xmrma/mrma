@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import ssl
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -16,6 +17,18 @@ BODY_STORAGE_MODES = ("none", "sample", "full")
 SAMPLE_BODY_BYTES = 64 * 1024
 
 
+def ssl_context_from_ca_bytes(ca_bytes: bytes) -> ssl.SSLContext:
+    """Build a client context from the exact CA bytes recorded in provenance."""
+    if b"-----BEGIN CERTIFICATE-----" in ca_bytes:
+        try:
+            cadata: str | bytes = ca_bytes.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise ValueError("PEM CA bundle must contain ASCII certificate data") from exc
+    else:
+        cadata = ca_bytes
+    return ssl.create_default_context(cadata=cadata)
+
+
 @dataclass(frozen=True)
 class SendOptions:
     trust_env: bool
@@ -23,11 +36,17 @@ class SendOptions:
     follow_redirects: bool = False
     verify_tls: bool = True
     proxy: str | None = None
-    ca_bundle: str | None = None
+    ssl_context: ssl.SSLContext | None = field(default=None, repr=False, compare=False)
+    environment_snapshot: tuple[tuple[str, str | None], ...] | None = field(
+        default=None,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
-        if not self.verify_tls and self.ca_bundle is not None:
-            raise ValueError("ca_bundle cannot be combined with disabled TLS verification")
+        if not self.verify_tls and self.ssl_context is not None:
+            raise ValueError("ssl_context cannot be combined with disabled TLS verification")
+        if not self.trust_env and self.environment_snapshot is not None:
+            raise ValueError("environment_snapshot requires trust_env=True")
 
 
 @dataclass(frozen=True)
@@ -96,16 +115,36 @@ class SemanticHttpTransport:
         self.close()
 
     def _new_client(self) -> httpx.Client:
-        verify: bool | ssl.SSLContext = self.opts.verify_tls
-        if self.opts.ca_bundle is not None:
-            verify = ssl.create_default_context(cafile=self.opts.ca_bundle)
-        return httpx.Client(
+        self._assert_environment_snapshot()
+        verify: bool | ssl.SSLContext = (
+            self.opts.ssl_context
+            if self.opts.ssl_context is not None
+            else self.opts.verify_tls
+        )
+        client = httpx.Client(
             timeout=self.opts.timeout_s,
             follow_redirects=self.opts.follow_redirects,
             verify=verify,
             trust_env=self.opts.trust_env,
             proxy=self.opts.proxy,
         )
+        try:
+            self._assert_environment_snapshot()
+        except RuntimeError:
+            client.close()
+            raise
+        return client
+
+    def _assert_environment_snapshot(self) -> None:
+        snapshot = self.opts.environment_snapshot
+        if snapshot is None:
+            return
+        changed = [name for name, expected in snapshot if os.environ.get(name) != expected]
+        if changed:
+            raise RuntimeError(
+                "transport environment changed after evidence snapshot: "
+                + ", ".join(changed)
+            )
 
     def close(self) -> None:
         for client in self._clients.values():

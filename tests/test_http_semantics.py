@@ -5,6 +5,7 @@ from hypothesis import strategies as st
 from mrma.core.http_semantics import (
     canonical_header_values,
     canonical_uri,
+    content_type_analysis,
     content_type_media_type,
     header_semantic_ambiguities,
 )
@@ -101,8 +102,74 @@ def test_content_type_requires_one_well_formed_declared_media_type():
         "content-type", ("text/plain", "application/json")
     ) == ("multiple-values",)
     assert header_semantic_ambiguities("content-type", ('text/plain; charset="',)) == (
-        "malformed-syntax",
+        "malformed-quoted-string",
     )
+
+
+def test_content_type_parses_quoted_delimiters_escapes_and_supported_charsets():
+    analysis = content_type_analysis(
+        ('Text/Plain; charset="UTF-8"; note="a;b,c\\\"d"',)
+    )
+
+    assert analysis.media_type == "text/plain"
+    assert analysis.charset == "utf-8"
+    assert analysis.parameters == (("charset", "UTF-8"), ("note", 'a;b,c"d'))
+    assert content_type_analysis(("text/plain; charset=US-ASCII",)).charset == "us-ascii"
+    aliases = content_type_analysis(
+        ("text/plain; charset=utf8; CHARSET=UTF-8",)
+    )
+    assert aliases.media_type == "text/plain"
+    assert aliases.charset == "utf-8"
+    assert aliases.ambiguities == ()
+
+
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        ("text/plain; charset=utf 8", "invalid-parameter-value"),
+        ("text/plain; charset", "missing-parameter-value"),
+        ("text/plain; =utf-8", "invalid-parameter-name"),
+        ("text/plain; charset =utf-8", "invalid-parameter-name"),
+        ("text/plain; charset= utf-8", "invalid-parameter-value"),
+        ("text/plain; charset=utf-8;", "missing-parameter-value"),
+        (
+            "text/plain; charset=utf-8; charset=us-ascii",
+            "conflicting-duplicate-parameter",
+        ),
+        ("text/plain; charset=iso-8859-1", "unsupported-charset"),
+        ("text/plain; charset=not-a-codec", "unsupported-charset"),
+    ],
+)
+def test_content_type_rejects_malformed_or_unsupported_parameters(value, reason):
+    analysis = content_type_analysis((value,))
+
+    assert analysis.media_type is None
+    assert reason in analysis.ambiguities
+
+
+@given(
+    name=st.text(alphabet="abcdefghijklmnopqrstuvwxyz-", min_size=1, max_size=12),
+    value=st.text(alphabet="abcdefghijklmnopqrstuvwxyz0123456789-", min_size=1, max_size=12),
+)
+def test_valid_token_parameters_preserve_media_type(name, value):
+    analysis = content_type_analysis((f"text/plain; x-{name}={value}",))
+
+    assert analysis.media_type == "text/plain"
+    assert analysis.ambiguities == ()
+
+
+@given(
+    left=st.text(alphabet="abc123", min_size=1, max_size=8),
+    right=st.text(alphabet="abc123", min_size=1, max_size=8),
+    whitespace=st.sampled_from([" ", "\t"]),
+)
+def test_unquoted_parameter_whitespace_is_never_accepted(left, right, whitespace):
+    analysis = content_type_analysis(
+        (f"text/plain; example={left}{whitespace}{right}",)
+    )
+
+    assert analysis.media_type is None
+    assert "invalid-parameter-value" in analysis.ambiguities
 
 
 @given(

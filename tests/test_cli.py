@@ -1,3 +1,4 @@
+import hashlib
 import json
 import tempfile
 from pathlib import Path
@@ -10,7 +11,7 @@ from mrma.cli import (
     _emit_json_if_requested,
     _experiment_exit_code,
     _redacted_target_metadata,
-    _transport_provenance,
+    _transport_configuration,
     _write_json_atomic,
 )
 from mrma.core.privacy import EvidenceRedactor
@@ -143,17 +144,28 @@ def test_transport_provenance_fingerprints_sensitive_inputs(monkeypatch):
             ca_bundle=str(ca_bundle),
             proxy="http://user:secret@proxy.test:8080",
         )
+        prepared: list[bytes] = []
+        marker = object()
+        monkeypatch.setattr(
+            "mrma.cli.ssl_context_from_ca_bytes",
+            lambda value: prepared.append(value) or marker,
+        )
 
-        tls_mode, proxy_mode, evidence = _transport_provenance(
-            args, EvidenceRedactor(_key=b"a" * 32)
+        tls_mode, proxy_mode, evidence, ssl_context, snapshot = (
+            _transport_configuration(args, EvidenceRedactor(_key=b"a" * 32))
         )
 
         assert tls_mode == "custom-ca"
         assert proxy_mode == "explicit"
-        assert evidence["tls"]["ca_fingerprint"].startswith("sha256:")
+        assert evidence["tls"]["ca_fingerprint"] == (
+            "sha256:" + hashlib.sha256(b"approved-ca").hexdigest()
+        )
         assert evidence["proxy"]["endpoint_fingerprint"].startswith("hmac-sha256:")
         assert "secret" not in str(evidence)
         assert str(ca_bundle) not in str(evidence)
+        assert prepared == [b"approved-ca"]
+        assert ssl_context is marker
+        assert snapshot is None
 
 
 def test_environment_transport_is_opt_in_and_fingerprinted(monkeypatch):
@@ -166,13 +178,17 @@ def test_environment_transport_is_opt_in_and_fingerprinted(monkeypatch):
         proxy=None,
     )
 
-    tls_mode, proxy_mode, evidence = _transport_provenance(
+    tls_mode, proxy_mode, evidence, ssl_context, snapshot = _transport_configuration(
         args, EvidenceRedactor(_key=b"a" * 32)
     )
 
     assert (tls_mode, proxy_mode) == ("environment", "environment")
     assert "secret" not in str(evidence)
     assert "company.pem" not in str(evidence)
+    assert ssl_context is None
+    assert snapshot is not None
+    assert dict(snapshot)["HTTPS_PROXY"] == "http://user:secret@proxy.test"
+    assert "HTTP_PROXY" in dict(snapshot)
 
 
 def test_durable_writer_syncs_file_before_replacement(monkeypatch):

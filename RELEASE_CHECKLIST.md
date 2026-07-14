@@ -20,7 +20,7 @@
 - [ ] `mrma config --json` works
 - [ ] `mrma run --url https://example.com --follow-redirects` works
 - [ ] `mrma experiment` detects a deterministic local mutation
-- [ ] `mrma experiment --json` emits schema-valid `mrma.experiment/v5` without decoration
+- [ ] `mrma experiment --json` emits schema-valid `mrma.experiment/v6` without decoration
 - [ ] cookie state does not cross observations in default isolated mode
 - [ ] response limits and transport failures produce typed evidence instead of crashes
 - [ ] redirect and retry traces affect verdicts when final responses are identical
@@ -28,7 +28,7 @@
 - [ ] method-token case and ambiguous cache-directive order remain decision-bearing
 - [ ] ambiguous cache syntax emits `AMBIGUOUS_CACHE_CONTROL`
 - [ ] retry error subtypes are decision-bearing while timing remains quantitative context
-- [ ] assurance presets, profiles, and structured limitations satisfy v5 cross-field constraints
+- [ ] assurance presets, profiles, and structured limitations satisfy v6 cross-field constraints
 - [ ] experiment transport ignores environment proxy/CA settings unless explicitly enabled
 - [ ] transport evidence fingerprints proxy/CA configuration without exposing values or paths
 - [ ] absent or ambiguous `Content-Type` remains digest-only unless explicitly overridden
