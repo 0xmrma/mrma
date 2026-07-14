@@ -6,6 +6,7 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from .http_semantics import canonical_uri
 from .raw_request import RawRequest
 
 STATE_MODES = ("isolated", "per-arm", "shared-session")
@@ -31,6 +32,7 @@ class RedirectHop:
     cross_origin: bool
     method_changed: bool
     credential_forwarding: str
+    resolved_target: str | None = None
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,7 @@ class CapturedResponse:
     redirect_chain: tuple[RedirectHop, ...]
     final_origin: str
     http_version: str | None = None
+    final_url: str | None = None
 
 
 class SemanticHttpTransport:
@@ -235,6 +238,7 @@ def _redirect_chain(response: httpx.Response) -> tuple[RedirectHop, ...]:
                     source_credentials,
                     target_credentials,
                 ),
+                resolved_target=canonical_uri(str(next_response.request.url)),
             )
         )
     return tuple(hops)
@@ -314,6 +318,7 @@ def _capture_response(
         redirect_chain=_redirect_chain(response),
         final_origin=_origin(response.request.url),
         http_version=response.http_version or None,
+        final_url=canonical_uri(str(response.request.url)),
     )
 
 

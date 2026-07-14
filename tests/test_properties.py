@@ -2,6 +2,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from mrma.core.experiment import operating_characteristics, wilson_interval
+from mrma.core.http_semantics import canonical_uri
 
 
 @given(total=st.integers(min_value=1, max_value=50), data=st.data())
@@ -27,3 +28,26 @@ def test_operating_characteristics_are_exact_threshold_boundaries(rounds):
         assert wilson_interval(negative, rounds)[1] <= 0.2
         if negative < rounds:
             assert wilson_interval(negative + 1, rounds)[1] > 0.2
+
+
+@given(octet=st.sampled_from(["41", "61", "2D", "2E", "5F", "7E"]))
+def test_unreserved_percent_encoding_is_canonicalized(octet):
+    character = chr(int(octet, 16))
+
+    assert canonical_uri(f"https://example.test/%{octet.lower()}") == canonical_uri(
+        f"https://example.test/{character}"
+    )
+
+
+@given(
+    segments=st.lists(
+        st.sampled_from(["a", "b", ".", "..", "%41", "%7e", ""]),
+        min_size=1,
+        max_size=12,
+    )
+)
+def test_canonical_redirect_targets_are_idempotent(segments):
+    target = "https://EXAMPLE.test:443/" + "/".join(segments)
+    canonical = canonical_uri(target)
+
+    assert canonical_uri(canonical) == canonical

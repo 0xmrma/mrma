@@ -47,6 +47,7 @@ jobs:
           mrma/core/compare.py
           mrma/core/experiment.py
           mrma/core/http_client.py
+          mrma/core/http_semantics.py
           mrma/core/privacy.py
           mrma/core/sender.py
       - name: Coverage
@@ -55,6 +56,7 @@ jobs:
           --cov=mrma.core.compare
           --cov=mrma.core.experiment
           --cov=mrma.core.http_client
+          --cov=mrma.core.http_semantics
           --cov=mrma.core.privacy
           --cov=mrma.core.sender
           --cov-report=term-missing
@@ -91,7 +93,7 @@ jobs:
           /tmp/mrma-wheel/bin/python -m pip check
           cd /tmp
           /tmp/mrma-wheel/bin/mrma --version
-          /tmp/mrma-wheel/bin/python -c "from importlib.resources import files; p=files('mrma.schemas').joinpath('experiment-v3.schema.json'); assert p.is_file(); assert 'site-packages' in str(p)"
+          /tmp/mrma-wheel/bin/python -c "from importlib.resources import files; root=files('mrma.schemas'); assert all(root.joinpath(f'experiment-v{v}.schema.json').is_file() for v in (2,3,4)); assert 'site-packages' in str(root)"
 
   container:
     runs-on: ubuntu-latest

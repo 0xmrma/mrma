@@ -126,7 +126,9 @@ def test_redirect_chain_records_cross_origin_and_redirect_cookie_is_observation_
     assert initial_cookies == [None, None]
     assert len(first.redirect_chain) == 1
     assert first.redirect_chain[0].cross_origin is True
+    assert first.redirect_chain[0].resolved_target == "https://other.test/final"
     assert first.final_origin == "https://other.test"
+    assert first.final_url == "https://other.test/final"
     # Cookie domain rules may suppress a cross-origin cookie; the chain remains isolated either way.
     assert len(final_cookies) == 2
 

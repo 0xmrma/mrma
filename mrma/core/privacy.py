@@ -107,6 +107,27 @@ class EvidenceRedactor:
         result = "/".join(masked)
         return result or "/"
 
+    def url(self, value: str) -> dict[str, object]:
+        """Represent a normalized URL without exposing query or fragment values."""
+        parts = urlsplit(value)
+        hostname = parts.hostname or ""
+        display_host = f"[{hostname}]" if ":" in hostname else hostname
+        port = f":{parts.port}" if parts.port is not None else ""
+        clear_origin = urlunsplit((parts.scheme, f"{display_host}{port}", "", "", ""))
+        payload: dict[str, object] = {
+            "origin": self.origin(clear_origin),
+            "path": self.path(parts.path or "/"),
+            "query_present": bool(parts.query),
+            "fragment_present": bool(parts.fragment),
+        }
+        if parts.query:
+            payload["query_fingerprint"] = self.fingerprint(parts.query, label="query")
+        if parts.fragment:
+            payload["fragment_fingerprint"] = self.fingerprint(
+                parts.fragment, label="fragment"
+            )
+        return payload
+
     def target_metadata(self, base_url: str, req: RawRequest) -> dict[str, object]:
         origin_parts = urlsplit(base_url)
         hostname = origin_parts.hostname or ""

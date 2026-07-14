@@ -35,6 +35,16 @@ adding more mutation families.
 - [x] Fixed-sample operating-characteristic preview and evidence dimensions
 - [x] Digest-pinned base image and hash-locked container dependencies
 
+## 0.3.3 - Semantic precision
+
+- [x] Canonical resolved redirect targets with contextual raw fingerprints
+- [x] Field-aware response-header comparison registry
+- [x] Decision-bearing retry error subtypes and quantitative timing summaries
+- [x] Multidimensional assurance profiles and structured limitation codes
+- [x] Research, exploratory, and forensic assurance presets
+- [x] Durable atomic experiment-evidence writes where directory sync is supported
+- [x] Strict `mrma.experiment/v4` with immutable v2 and v3 compatibility contracts
+
 ## 0.4 - One experiment oracle
 
 - Integrate repeated controls into impact, profiles, discovery, and isolation

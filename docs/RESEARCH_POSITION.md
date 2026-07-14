@@ -38,14 +38,14 @@ MRMA should treat every finding as an experiment, not an anomaly row:
 7. Minimize the responsible input using the same repeated oracle.
 8. Export a versioned evidence object that another engineer can replay and audit.
 
-Version 0.3.2 implements steps 1-6 for a single mutation in `mrma experiment`, including explicit
-state and connection modes, fixed-sample confidence decisions, decision-bearing redirect/retry
-traces, typed transport outcomes, and bounded observations.
+Version 0.3.3 implements steps 1-6 for a single mutation in `mrma experiment`, including explicit
+state and connection modes, fixed-sample confidence decisions, canonical redirect and field-aware
+header semantics, typed retry subtypes, multidimensional assurance, and bounded observations.
 Existing isolation commands implement early forms of step 7 but do not yet use this oracle.
 
 ## Defensible differentiation
 
-The memorable product is not “a header fuzzer with nicer output.” It is:
+The memorable product is not "a header fuzzer with nicer output." It is:
 
 **An experimental instrument for mapping request-property influence across layered HTTP systems.**
 
@@ -64,7 +64,7 @@ a decision when black-box observations cannot establish it.
 
 - No severity score without a validated model. Influence, reproducibility, and impact remain
   separate dimensions.
-- No “raw” label for requests normalized by a general HTTP library. Results declare their
+- No "raw" label for requests normalized by a general HTTP library. Results declare their
   transport mode.
 - No positive verdict from one baseline and one mutation.
 - No hidden normalization. The effective policy is part of result metadata; potentially sensitive

@@ -7,7 +7,7 @@ across a layered HTTP system, then helps reduce that signal to the smallest resp
 It is not a generic vulnerability scanner and it does not treat a one-off response difference as
 a finding.
 
-> Status: `0.3.2` research preview. `mrma experiment` has a conservative evidence contract;
+> Status: `0.3.3` research preview. `mrma experiment` has a conservative evidence contract;
 > legacy survey and minimization commands do not yet share this oracle.
 
 ## The flagship workflow
@@ -19,7 +19,8 @@ locally bracketed by an unchanged control before and after it (60 requests at th
 mrma experiment \
   --url https://target.example/account \
   --set-header "X-Forwarded-Host: example.invalid" \
-  --preset dynamic
+  --preset dynamic \
+  --assurance research
 ```
 
 MRMA isolates response-cookie state between observations by default, measures local control drift,
@@ -46,12 +47,14 @@ The result includes:
 - mutation reproducibility with a decision-bearing 95% Wilson interval;
 - independent control-before/control-after stability intervals;
 - control-versus-mutation similarity contrast;
-- typed transport outcomes, decision-bearing redirect and retry traces, status shifts, and
-  duplicate response-header evidence;
+- typed transport outcomes, canonical decision-bearing redirect targets, retry error subtypes,
+  status shifts, and field-aware response-header evidence;
 - the effective normalization policy, state and connection modes, response bound, complete retry
   policy, negotiated HTTP versions, and stop reason;
-- separate evidence dimensions for statistical decisiveness, control stability, transport
-  completeness, isolation, normalization risk, and effect type;
+- a multidimensional assurance profile for statistical decisiveness, control stability,
+  connection independence, state isolation, body completeness, normalization risk, and transport
+  reproducibility, without a scalar confidence label;
+- structured limitation codes with severity, scope, explanation, and remediation;
 - a short run ID and evidence schema version.
 
 The default privacy policy masks paths and internal hosts, buckets size/timing values, and uses a
@@ -67,13 +70,14 @@ mrma experiment \
   --url https://example.com \
   --set-header "X-Forwarded-For: 127.0.0.1" \
   --json --out-json evidence.json \
+  --evidence-write durable \
   --fail-on any-signal
 ```
 
-The output declares `mrma.experiment/v3`; exit code `10` means influence and `11` means
-inconclusive when selected by `--fail-on`. The strict v3 JSON Schema defines every nested evidence
-object; the published v2 schema remains packaged for compatibility. The default exit code remains
-zero for all verdicts.
+The output declares `mrma.experiment/v4`; exit code `10` means influence and `11` means
+inconclusive when selected by `--fail-on`. The strict v4 JSON Schema defines every nested evidence
+object and cross-field assurance invariant. Published v2 and v3 schemas remain packaged and
+immutable for compatibility. The default exit code remains zero for all verdicts.
 The transport is labeled `semantic-http`; MRMA uses `httpx` and does not claim byte-for-byte HTTP/1
 wire reproduction.
 
@@ -83,13 +87,32 @@ KiB per observation. When full normalization cannot be performed, unequal digest
 exact transfer-digest equality only until bounded, content-aware decoders are implemented.
 
 Retries are disabled by default. When enabled, every intermediate attempt, outcome class,
-retry-triggering status, backoff, and final result is recorded. Asymmetric mutation retries are
-decision-bearing rather than being hidden behind an identical final response.
+error subtype, retry-triggering status, backoff, and final result is recorded. Stable error-subtype
+and asymmetric retry differences are decision-bearing. Attempt elapsed time and configured backoff
+are summarized with medians, median absolute deviations, and direction consistency as contextual
+quantitative evidence; a small one-off timing difference cannot create an influence verdict.
+
+Redirect comparison resolves and canonicalizes targets before classification. Relative and
+absolute forms, default ports, host casing, dot segments, and percent-encoded unreserved
+characters do not create false signals. Raw `Location` formatting is retained only as a keyed
+fingerprint. Response fields use explicit semantics for `Vary`, `Allow`, CORS token sets,
+`Cache-Control`, `Location`, and `Content-Location`; captured fields without a registry rule and
+`Set-Cookie` remain conservative ordered evidence.
 
 Connection scope is explicit: `reuse` (default), `per-arm`, `per-round`, or `fresh-observation`.
 Cookie state remains a separate policy. Wilson intervals assume repeated observations are suitably
 independent; use `--connection-mode fresh-observation` when load-balancer affinity, connection-bound
 authentication, HTTP/2 state, throttling, or WAF scoring could violate that assumption.
+
+For publication-oriented work, `--assurance research` authoritatively selects fresh connections,
+isolated response state, disabled retries, a 20-round bracketed design, standard privacy, and full
+body retention within the configured response bound. `exploratory` preserves efficient pooled
+behavior; `forensic` uses research isolation while intentionally retaining exact metadata.
+
+JSON output uses atomic replacement. Add `--evidence-write durable` to flush and synchronize the
+temporary file before replacement and synchronize the parent directory on platforms that support
+directory `fsync`. The evidence object records whether directory synchronization was performed or
+unsupported. This durability mode applies to experiment JSON, not legacy report files.
 
 ## Container package
 
@@ -97,14 +120,14 @@ MRMA is published as a non-root multi-architecture container through GitHub Cont
 the Python base is pinned by OCI digest and build/runtime dependencies are exact and hash-verified.
 
 ```bash
-docker pull ghcr.io/0xmrma/mrma:0.3.2
-docker run --rm ghcr.io/0xmrma/mrma:0.3.2 --version
+docker pull ghcr.io/0xmrma/mrma:0.3.3
+docker run --rm ghcr.io/0xmrma/mrma:0.3.3 --version
 ```
 
 Run an authorized experiment from the container:
 
 ```bash
-docker run --rm ghcr.io/0xmrma/mrma:0.3.2 \
+docker run --rm ghcr.io/0xmrma/mrma:0.3.3 \
   experiment --url https://example.com --set-header "X-Test: 1"
 ```
 

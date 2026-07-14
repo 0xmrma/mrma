@@ -21,6 +21,7 @@ from .compare import (
     resolve_equivalence_policy,
 )
 from .http_client import CapturedResponse, RedirectHop
+from .http_semantics import canonical_header_values, canonical_uri
 from .privacy import EvidenceRedactor
 from .raw_request import RawRequest
 from .sender import AttemptRecord, SendOutcome
@@ -63,6 +64,10 @@ EVIDENCE_RESPONSE_HEADERS = (
     "x-nextjs-data",
     "access-control-allow-origin",
     "access-control-allow-credentials",
+    "access-control-allow-headers",
+    "access-control-allow-methods",
+    "access-control-expose-headers",
+    "allow",
 )
 
 
@@ -81,6 +86,7 @@ class ExperimentConfig:
     connection_mode: str = "reuse"
     max_response_bytes: int = 1024 * 1024
     body_storage: str = "sample"
+    assurance_preset: str = "custom"
     redactor: EvidenceRedactor = field(default_factory=EvidenceRedactor, repr=False)
 
     def round_limits(self) -> tuple[int, int]:
@@ -100,7 +106,7 @@ class AttemptEvidence:
     error_type: str | None = None
 
     def signature(self) -> tuple[object, ...]:
-        return (self.outcome, self.status, self.retry_reason)
+        return (self.outcome, self.status, self.retry_reason, self.error_type)
 
     def to_dict(self, redactor: EvidenceRedactor) -> dict[str, object]:
         return {
@@ -138,6 +144,7 @@ class Observation:
     redirect_chain: tuple[RedirectHop, ...] = ()
     final_origin: str | None = None
     http_version: str | None = None
+    final_url: str | None = field(default=None, repr=False)
 
     def to_dict(self, redactor: EvidenceRedactor) -> dict[str, object]:
         header_fingerprints: dict[str, list[dict[str, object]]] = {}
@@ -184,11 +191,12 @@ class Observation:
                     "method": hop.method,
                     "origin": redactor.origin(hop.origin),
                     "target_origin": redactor.origin(hop.target_origin),
-                    "location_fingerprint": (
+                    "raw_location_fingerprint": (
                         redactor.fingerprint(hop.location, label="redirect-location")
                         if hop.location is not None
                         else None
                     ),
+                    "normalized_resolved_target": _public_redirect_target(hop, redactor),
                     "cross_origin": hop.cross_origin,
                     "method_changed": hop.method_changed,
                     "credential_forwarding": hop.credential_forwarding,
@@ -215,6 +223,8 @@ class PairEvidence:
     redirect_diffs: tuple[str, ...]
     attempt_diffs: tuple[str, ...]
     comparator: str
+    attempt_elapsed_delta_ms: float | None = None
+    backoff_delta_ms: float | None = None
 
     @property
     def changed(self) -> bool:
@@ -239,13 +249,16 @@ class PairEvidence:
             "redirect_diffs": list(self.redirect_diffs),
             "attempt_diffs": list(self.attempt_diffs),
             "comparator": self.comparator,
+            "attempt_elapsed_delta": _public_timing_delta(
+                self.attempt_elapsed_delta_ms, redactor
+            ),
+            "backoff_delta": _public_timing_delta(self.backoff_delta_ms, redactor),
         }
 
 
 @dataclass
 class ExperimentResult:
     verdict: str
-    evidence_grade: str
     stop_reason: str
     rounds: int
     schedule_seed: int | None
@@ -296,7 +309,6 @@ class ExperimentResult:
         )
         return {
             "verdict": self.verdict,
-            "evidence_grade": self.evidence_grade,
             "stop_reason": self.stop_reason,
             "design": {
                 "planned_rounds": planned_rounds,
@@ -315,6 +327,7 @@ class ExperimentResult:
                 "control_comparisons": self.control_comparisons,
                 "state_mode": self.config.state_mode,
                 "connection_mode": self.config.connection_mode,
+                "assurance_preset": self.config.assurance_preset,
                 "body_storage": self.config.body_storage,
                 "max_response_bytes": self.config.max_response_bytes,
                 "operating_characteristics": operating_characteristics(
@@ -351,8 +364,17 @@ class ExperimentResult:
                     for name, count in self.header_shift_counts.items()
                 },
                 "outcome_counts": self.outcome_counts,
+                "retry_timing": {
+                    "attempt_elapsed": _timing_summary(
+                        self.pairs, "attempt_elapsed_delta_ms", redactor
+                    ),
+                    "configured_backoff": _timing_summary(
+                        self.pairs, "backoff_delta_ms", redactor
+                    ),
+                },
             },
-            "evidence_dimensions": _evidence_dimensions(self),
+            "assurance_profile": _assurance_profile(self),
+            "limitations": _limitations(self),
             "reasons": self.reasons,
             "round_evidence": [pair.to_dict(redactor) for pair in self.pairs],
             "observations": [item.to_dict(redactor) for item in self.observations],
@@ -577,6 +599,7 @@ def _observe(
         redirect_chain=captured.redirect_chain if captured else (),
         final_origin=captured.final_origin if captured else None,
         http_version=captured.http_version if captured else None,
+        final_url=captured.final_url if captured else None,
     )
 
 
@@ -586,22 +609,28 @@ def _header_diffs(a: Observation, b: Observation) -> tuple[str, ...]:
         sorted(
             name
             for name in names
-            if _canonical_header_values(name, a.headers.get(name, ()))
-            != _canonical_header_values(name, b.headers.get(name, ()))
+            if canonical_header_values(
+                name, a.headers.get(name, ()), base_url=a.final_url
+            )
+            != canonical_header_values(
+                name, b.headers.get(name, ()), base_url=b.final_url
+            )
         )
     )
 
 
-def _canonical_header_values(name: str, values: tuple[str, ...]) -> tuple[str, ...]:
-    if name == "vary":
-        tokens = {
-            token.strip().lower()
-            for value in values
-            for token in value.split(",")
-            if token.strip()
-        }
-        return tuple(sorted(tokens))
-    return values
+def _resolved_redirect_target(hop: RedirectHop) -> str | None:
+    if hop.resolved_target:
+        return canonical_uri(hop.resolved_target)
+    return None
+
+
+def _public_redirect_target(
+    hop: RedirectHop,
+    redactor: EvidenceRedactor,
+) -> dict[str, object] | None:
+    target = _resolved_redirect_target(hop)
+    return redactor.url(target) if target is not None else None
 
 
 def _redirect_diffs(a: Observation, b: Observation) -> tuple[str, ...]:
@@ -628,9 +657,9 @@ def _redirect_diffs(a: Observation, b: Observation) -> tuple[str, ...]:
             tuple(hop.target_origin for hop in b.redirect_chain),
         ),
         (
-            "location-sequence",
-            tuple(hop.location for hop in a.redirect_chain),
-            tuple(hop.location for hop in b.redirect_chain),
+            "resolved-target-sequence",
+            tuple(_resolved_redirect_target(hop) for hop in a.redirect_chain),
+            tuple(_resolved_redirect_target(hop) for hop in b.redirect_chain),
         ),
         (
             "cross-origin-transitions",
@@ -672,8 +701,68 @@ def _attempt_diffs(a: Observation, b: Observation) -> tuple[str, ...]:
             tuple(item.retry_reason for item in intermediate_a),
             tuple(item.retry_reason for item in intermediate_b),
         ),
+        (
+            "error-type-sequence",
+            tuple(item.error_type for item in a.attempt_trace),
+            tuple(item.error_type for item in b.attempt_trace),
+        ),
     )
     return tuple(name for name, left, right in fields if left != right)
+
+
+def _attempt_timing_delta(
+    a: Observation,
+    b: Observation,
+    attribute: str,
+) -> float:
+    left = sum(float(getattr(item, attribute) or 0.0) for item in a.attempt_trace)
+    right = sum(float(getattr(item, attribute) or 0.0) for item in b.attempt_trace)
+    return round(right - left, 3)
+
+
+def _public_timing_delta(
+    value: float | None,
+    redactor: EvidenceRedactor,
+) -> dict[str, object] | None:
+    if value is None:
+        return None
+    direction = "equal" if value == 0 else "mutation-higher" if value > 0 else "mutation-lower"
+    return {
+        "direction": direction,
+        "magnitude": redactor.elapsed_ms(abs(value)),
+    }
+
+
+def _timing_summary(
+    pairs: list[PairEvidence],
+    attribute: str,
+    redactor: EvidenceRedactor,
+) -> dict[str, object]:
+    values = [
+        float(value)
+        for pair in pairs
+        if (value := getattr(pair, attribute)) is not None
+    ]
+    if not values:
+        return {
+            "samples": 0,
+            "median_delta": None,
+            "median_absolute_deviation": None,
+            "direction_consistency": None,
+            "decision_role": "contextual",
+        }
+    center = float(median(values))
+    deviation = float(median(abs(value - center) for value in values))
+    positive = sum(value > 0 for value in values)
+    negative = sum(value < 0 for value in values)
+    equal = len(values) - positive - negative
+    return {
+        "samples": len(values),
+        "median_delta": _public_timing_delta(center, redactor),
+        "median_absolute_deviation": redactor.elapsed_ms(deviation),
+        "direction_consistency": round(max(positive, negative, equal) / len(values), 6),
+        "decision_role": "contextual",
+    }
 
 
 def _body_comparator_eligible(observation: Observation) -> bool:
@@ -708,6 +797,8 @@ def _compare(
     header_diffs = _header_diffs(a, b)
     redirect_diffs = _redirect_diffs(a, b)
     attempt_diffs = _attempt_diffs(a, b)
+    attempt_elapsed_delta_ms = _attempt_timing_delta(a, b, "elapsed_ms")
+    backoff_delta_ms = _attempt_timing_delta(a, b, "backoff_ms")
     status_changed = a.status != b.status
     outcome_changed = a.outcome != b.outcome
     redirect_changed = bool(redirect_diffs)
@@ -731,6 +822,8 @@ def _compare(
             redirect_diffs=redirect_diffs,
             attempt_diffs=attempt_diffs,
             comparator="outcome",
+            attempt_elapsed_delta_ms=attempt_elapsed_delta_ms,
+            backoff_delta_ms=backoff_delta_ms,
         )
 
     if _body_comparator_eligible(a) and _body_comparator_eligible(b):
@@ -754,6 +847,8 @@ def _compare(
             redirect_diffs=redirect_diffs,
             attempt_diffs=attempt_diffs,
             comparator=comparison.comparator,
+            attempt_elapsed_delta_ms=attempt_elapsed_delta_ms,
+            backoff_delta_ms=backoff_delta_ms,
         )
 
     exact_digest_match = (
@@ -786,6 +881,8 @@ def _compare(
         redirect_diffs=redirect_diffs,
         attempt_diffs=attempt_diffs,
         comparator="exact-digest" if exact_digest_match else "bounded-incomplete",
+        attempt_elapsed_delta_ms=attempt_elapsed_delta_ms,
+        backoff_delta_ms=backoff_delta_ms,
     )
 
 
@@ -820,6 +917,14 @@ def _combine_bracket(
         for value in (before_mutation.length_delta_ratio, after_mutation.length_delta_ratio)
         if value is not None
     ]
+
+    def bracket_delta(first: float | None, second: float | None) -> float | None:
+        if first is None or second is None:
+            return None
+        if first and second and (first > 0) != (second > 0):
+            return None
+        return round(float(median((first, second))), 3)
+
     return PairEvidence(
         round_index=round_index,
         classification=classification,
@@ -840,6 +945,14 @@ def _combine_bracket(
         redirect_diffs=tuple(sorted(redirect_diffs)),
         attempt_diffs=tuple(sorted(attempt_diffs)),
         comparator=f"bracketed:{before_mutation.comparator}/{after_mutation.comparator}",
+        attempt_elapsed_delta_ms=bracket_delta(
+            before_mutation.attempt_elapsed_delta_ms,
+            after_mutation.attempt_elapsed_delta_ms,
+        ),
+        backoff_delta_ms=bracket_delta(
+            before_mutation.backoff_delta_ms,
+            after_mutation.backoff_delta_ms,
+        ),
     )
 
 
@@ -848,15 +961,7 @@ def _median_similarity(pairs: list[PairEvidence]) -> float | None:
     return round(median(values), 6) if values else None
 
 
-def _evidence_grade(verdict: str, observations: list[Observation]) -> str:
-    if verdict == "INCONCLUSIVE":
-        return "limited"
-    if any(item.outcome != HTTP_RESPONSE for item in observations):
-        return "moderate"
-    return "strong"
-
-
-def _evidence_dimensions(result: ExperimentResult) -> dict[str, object]:
+def _effect_types(result: ExperimentResult) -> list[str]:
     effects: list[str] = []
     if result.status_shift_rounds:
         effects.append("status")
@@ -870,6 +975,20 @@ def _evidence_dimensions(result: ExperimentResult) -> dict[str, object]:
         effects.append("redirect-trace")
     if result.retry_shift_rounds:
         effects.append("retry-trace")
+    return effects
+
+
+def _normalization_risk(result: ExperimentResult) -> str:
+    return (
+        "elevated"
+        if result.effective_policy.ignore_headers
+        or result.effective_policy.ignore_body_regex
+        or result.effective_policy.preset != "default"
+        else "low"
+    )
+
+
+def _assurance_profile(result: ExperimentResult) -> dict[str, object]:
     has_transport_outcome = any(item.outcome != HTTP_RESPONSE for item in result.observations)
     controls_complete = all(
         item.outcome == HTTP_RESPONSE
@@ -880,42 +999,142 @@ def _evidence_dimensions(result: ExperimentResult) -> dict[str, object]:
         not item.body_digest_complete or not item.body_retained_complete
         for item in result.observations
     )
-    normalization_risk = (
-        "elevated"
-        if result.effective_policy.ignore_headers
-        or result.effective_policy.ignore_body_regex
-        or result.effective_policy.preset != "default"
-        else "low"
-    )
+    connection_independence = {
+        "fresh-observation": "strong",
+        "per-round": "moderate",
+        "per-arm": "limited",
+        "reuse": "limited",
+    }[result.config.connection_mode]
+    state_isolation = {
+        "isolated": "strong",
+        "per-arm": "moderate",
+        "shared-session": "limited",
+    }[result.config.state_mode]
     return {
         "statistical_decisiveness": (
-            "decisive" if result.verdict != "INCONCLUSIVE" else "inconclusive"
+            "strong" if result.verdict != "INCONCLUSIVE" else "limited"
         ),
         "control_stability": (
-            "stable"
+            "strong"
             if controls_complete
             and result.control_change_interval_95[1]
             <= result.config.max_control_change_rate
             and result.control_indeterminate == 0
-            else "unstable-or-insufficient"
+            else "limited"
         ),
-        "transport_completeness": (
-            "typed-failure"
+        "connection_independence": connection_independence,
+        "state_isolation": state_isolation,
+        "body_completeness": "bounded" if has_incomplete_body else "complete",
+        "normalization_risk": _normalization_risk(result),
+        "transport_reproducibility": (
+            "moderate"
             if has_transport_outcome
-            else "bounded"
-            if has_incomplete_body
-            else "complete"
+            else "strong"
         ),
-        "state_isolation": result.config.state_mode,
-        "connection_isolation": result.config.connection_mode,
-        "normalization_risk": normalization_risk,
-        "effect_types": effects,
+        "effect_types": _effect_types(result),
         "reproduction_completeness": (
-            "complete"
+            "strong"
             if result.mutation_indeterminate == 0
-            else "contains-indeterminate-rounds"
+            else "limited"
         ),
     }
+
+
+def _limitation(
+    code: str,
+    severity: str,
+    scope: str,
+    message: str,
+    remediation: str,
+) -> dict[str, str]:
+    return {
+        "code": code,
+        "severity": severity,
+        "scope": scope,
+        "message": message,
+        "remediation": remediation,
+    }
+
+
+def _limitations(result: ExperimentResult) -> list[dict[str, str]]:
+    limitations: list[dict[str, str]] = []
+    if result.config.connection_mode != "fresh-observation":
+        limitations.append(
+            _limitation(
+                "CONNECTION_REUSE",
+                "low" if result.config.connection_mode == "per-round" else "moderate",
+                "statistical_independence",
+                f"Connection mode {result.config.connection_mode} can share transport state.",
+                "Repeat with connection_mode=fresh-observation.",
+            )
+        )
+    if result.config.state_mode != "isolated":
+        limitations.append(
+            _limitation(
+                "RESPONSE_STATE_REUSE",
+                "moderate",
+                "state_isolation",
+                f"State mode {result.config.state_mode} carries response-derived cookie state.",
+                "Repeat with state_mode=isolated.",
+            )
+        )
+    if _normalization_risk(result) == "elevated":
+        limitations.append(
+            _limitation(
+                "ELEVATED_NORMALIZATION",
+                "moderate",
+                "semantic_comparison",
+                "Configured normalization or ignored evidence can suppress real differences.",
+                "Confirm the result with the default equivalence policy.",
+            )
+        )
+    if any(
+        not item.body_digest_complete or not item.body_retained_complete
+        for item in result.observations
+    ):
+        limitations.append(
+            _limitation(
+                "BOUNDED_BODY_EVIDENCE",
+                "moderate",
+                "body_completeness",
+                "At least one response body was truncated or not retained completely.",
+                "Increase max_response_bytes or use body_storage=full within an approved budget.",
+            )
+        )
+    if any(item.outcome != HTTP_RESPONSE for item in result.observations):
+        limitations.append(
+            _limitation(
+                "TYPED_TRANSPORT_FAILURE",
+                "moderate",
+                "transport_reproducibility",
+                "At least one observation ended as a typed transport or policy outcome.",
+                "Repeat from an independent transport environment and compare outcome subtypes.",
+            )
+        )
+    if any(
+        hop.resolved_target is None
+        for item in result.observations
+        for hop in item.redirect_chain
+    ):
+        limitations.append(
+            _limitation(
+                "INFERRED_REDIRECT_TARGET",
+                "low",
+                "redirect_semantics",
+                "At least one redirect target was inferred without the actual followed request URL.",
+                "Capture redirects through the semantic transport to record resolved targets.",
+            )
+        )
+    limitations.append(
+        _limitation(
+            "SEMANTIC_HTTP_TRANSPORT",
+            "low",
+            "protocol_fidelity",
+            "The HTTP client may normalize request syntax and does not preserve wire-exact bytes.",
+            "Use a future wire-exact backend when syntax-level behavior is the research target.",
+        )
+    )
+    return limitations
 
 
 def analyze_experiment(
@@ -1037,7 +1256,6 @@ def analyze_experiment(
 
     return ExperimentResult(
         verdict=verdict,
-        evidence_grade=_evidence_grade(verdict, observations),
         stop_reason=stop_reason,
         rounds=len(pairs),
         schedule_seed=schedule_seed,
@@ -1100,6 +1318,8 @@ def _validate_config(cfg: ExperimentConfig) -> tuple[int, int]:
         raise ValueError(
             "connection_mode must be reuse, per-arm, per-round, or fresh-observation"
         )
+    if cfg.assurance_preset not in {"custom", "exploratory", "research", "forensic"}:
+        raise ValueError("assurance_preset must be custom, exploratory, research, or forensic")
     return min_rounds, max_rounds
 
 

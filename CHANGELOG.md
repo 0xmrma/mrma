@@ -3,6 +3,40 @@
 All notable changes are documented here. MRMA follows semantic versioning for the CLI and uses an
 independent version in each machine-readable evidence schema.
 
+## 0.3.3 - 2026-07-14
+
+### Semantic Precision
+
+- Redirect decisions now compare canonical resolved targets. Raw `Location` representations remain
+  keyed contextual evidence, so relative/absolute forms, default ports, host casing, dot segments,
+  and equivalent percent encoding do not create false influence signals.
+- Added a field-aware response-header registry for `Vary`, `Allow`, CORS token sets,
+  `Cache-Control`, `Location`, and `Content-Location`. Captured fields without a registry rule and
+  `Set-Cookie` retain conservative ordered comparison.
+- Stable retry error-subtype sequences are decision-bearing. Attempt elapsed time and configured
+  backoff are exported as contextual median, median-absolute-deviation, and direction-consistency
+  evidence rather than one-shot binary differences.
+
+### Assurance And Evidence
+
+- Experiment evidence advances to `mrma.experiment/v4`; published v2 and v3 contracts are tested
+  as immutable. V4 removes the scalar confidence grade and requires a multidimensional assurance
+  profile.
+- Results now include structured limitations with stable code, severity, scope, message, and
+  remediation fields for CI policy and external review.
+- Added authoritative `exploratory`, `research`, and `forensic` assurance presets. Research mode
+  selects fresh connections, isolated response state, disabled retries, a 20-round bracketed
+  design, standard privacy, and full body retention within the response bound.
+- Added optional durable experiment-evidence writes with file synchronization and parent-directory
+  synchronization where supported. Normal atomic replacement remains available.
+
+### Verification
+
+- Added semantic equivalence, retry-subtype, timing-distribution, assurance-profile, schema-negative,
+  preset-invariant, durable-write interruption, and URI property tests.
+- CI now type-checks and measures the HTTP semantics registry and verifies all three published
+  schema generations inside the clean installed wheel.
+
 ## 0.3.2 - 2026-07-14
 
 ### Evidence Correctness

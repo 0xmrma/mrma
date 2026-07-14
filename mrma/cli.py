@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -115,21 +116,60 @@ def _emit_json_if_requested(args, payload) -> bool:
     # If --out is set, write JSON to file; else print to stdout
     out_path = getattr(args, "out_json", None)
     if out_path:
-        destination = Path(out_path)
-        temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
-        try:
-            temporary.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-                errors="replace",
-            )
-            temporary.replace(destination)
-        finally:
-            temporary.unlink(missing_ok=True)
+        _write_json_atomic(
+            Path(out_path),
+            payload,
+            durable=getattr(args, "evidence_write", "normal") == "durable",
+        )
     else:
         print_json(payload)
 
     return True
+
+
+def _directory_sync_supported() -> bool:
+    return os.name == "posix" and hasattr(os, "O_DIRECTORY")
+
+
+def _write_json_atomic(destination: Path, payload: object, *, durable: bool) -> None:
+    temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    try:
+        with temporary.open("x", encoding="utf-8", newline="\n") as output:
+            output.write(serialized)
+            if durable:
+                output.flush()
+                os.fsync(output.fileno())
+        os.replace(temporary, destination)
+        if durable and _directory_sync_supported():
+            directory_fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _apply_assurance_preset(args: argparse.Namespace) -> str:
+    preset = getattr(args, "assurance", None)
+    if preset is None:
+        return "custom"
+    if preset == "exploratory":
+        args.connection_mode = "reuse"
+        args.state_mode = "isolated"
+        args.retries = 0
+        args.redaction_policy = "standard"
+        args.body_storage = "sample"
+    elif preset in {"research", "forensic"}:
+        args.connection_mode = "fresh-observation"
+        args.state_mode = "isolated"
+        args.retries = 0
+        args.redaction_policy = "forensic" if preset == "forensic" else "standard"
+        args.body_storage = "full"
+        args.schedule = "bracketed"
+        args.rounds = 20
+    return preset
 
 def _apply_add_common(req, add_common: bool):
     if not add_common:
@@ -548,6 +588,7 @@ def cmd_experiment(args: argparse.Namespace) -> int:
     )
     apply_cfg_list_default(args, "ignore_header", defaults.get("ignore_headers"))
     apply_cfg_list_default(args, "ignore_body_regex", defaults.get("ignore_body_regex"))
+    assurance_preset = _apply_assurance_preset(args)
 
     if args.rounds is not None and (
         args.rounds < 6
@@ -597,6 +638,10 @@ def cmd_experiment(args: argparse.Namespace) -> int:
         or args.max_response_bytes <= 0
     ):
         raise SystemExit("Error: timeout must be positive; delay, rps, and retries cannot be negative")
+    if args.out_json and not args.json:
+        raise SystemExit("Error: --out-json requires --json")
+    if args.evidence_write == "durable" and not args.out_json:
+        raise SystemExit("Error: --evidence-write durable requires --out-json")
 
     baseline = _apply_add_common(req, args.add_common)
     mutated, removed_headers, set_headers = _apply_header_mutations(baseline, args)
@@ -638,6 +683,7 @@ def cmd_experiment(args: argparse.Namespace) -> int:
         connection_mode=args.connection_mode,
         max_response_bytes=args.max_response_bytes,
         body_storage=args.body_storage,
+        assurance_preset=assurance_preset,
         redactor=redactor,
     )
     opts = SendOptions(
@@ -734,8 +780,9 @@ def cmd_experiment(args: argparse.Namespace) -> int:
     completed_at = utc_now_iso()
     public_duration = redactor.run_duration_ms(duration_ms)
     target_metadata = _redacted_target_metadata(base_url, baseline, redactor)
+    result_payload = result.to_dict()
     payload = {
-        "schema_version": "mrma.experiment/v3",
+        "schema_version": "mrma.experiment/v4",
         "run": {
             "id": run_id,
             "started_at": redactor.run_timestamp(started_at),
@@ -780,6 +827,21 @@ def cmd_experiment(args: argparse.Namespace) -> int:
             "fingerprints": "per-run keyed HMAC-SHA256",
             "cross_run_correlation": False,
         },
+        "evidence_storage": {
+            "sink": "file" if args.out_json else "stdout",
+            "write_mode": args.evidence_write if args.out_json else "stdout",
+            "file_sync": bool(args.out_json and args.evidence_write == "durable"),
+            "directory_sync": (
+                "performed"
+                if args.out_json
+                and args.evidence_write == "durable"
+                and _directory_sync_supported()
+                else "unsupported"
+                if args.out_json and args.evidence_write == "durable"
+                else "not-requested"
+            ),
+            "scope": "experiment-json-only",
+        },
         "target": target_metadata,
         "mutation": {
             "set_header_names": [redactor.header_name(name) for name in set_headers],
@@ -792,7 +854,7 @@ def cmd_experiment(args: argparse.Namespace) -> int:
             "control_upper_bound": args.max_control_change_rate,
             "confidence": 0.95,
         },
-        "result": result.to_dict(),
+        "result": result_payload,
     }
     exit_code = _experiment_exit_code(result.verdict, args.fail_on)
     if _emit_json_if_requested(args, payload):
@@ -807,7 +869,7 @@ def cmd_experiment(args: argparse.Namespace) -> int:
     summary.add_column(justify="right")
     summary.add_row(
         f"[{style}]{heading}[/{style}]",
-        f"[bold]{result.evidence_grade.upper()} CONFIDENCE GRADE[/bold]",
+        f"[bold]{assurance_preset.upper()} ASSURANCE POLICY[/bold]",
     )
     summary.add_row(
         f"[muted]{baseline.method} {target_metadata['path']}[/muted]",
@@ -856,6 +918,20 @@ def cmd_experiment(args: argparse.Namespace) -> int:
     )
     console.print(evidence)
 
+    assurance = Table(box=box.SIMPLE_HEAD, show_edge=False, pad_edge=False, expand=True)
+    assurance.add_column("ASSURANCE DIMENSION", style="muted", width=28)
+    assurance.add_column("ASSESSMENT", style="bold white")
+    for name, value in result_payload["assurance_profile"].items():
+        if name == "effect_types":
+            value = ", ".join(value) if value else "none"
+        assurance.add_row(name.replace("_", " ").title(), str(value))
+    console.print(assurance)
+
+    limitations = result_payload["limitations"]
+    if limitations:
+        codes = ", ".join(item["code"] for item in limitations)
+        console.print(f"[warning]Declared limitations:[/warning] {codes}")
+
     if result.header_shift_counts:
         shifts = ", ".join(
             f"{name} {count}/{result.rounds}"
@@ -871,7 +947,7 @@ def cmd_experiment(args: argparse.Namespace) -> int:
         f"[muted]Stop: {result.stop_reason}  |  state: {args.state_mode}  |  "
         f"{schedule_detail}[/muted]"
     )
-    console.print(f"[muted]Run {run_id[:12]}  |  mrma.experiment/v3  |  {duration_ms:.0f} ms[/muted]")
+    console.print(f"[muted]Run {run_id[:12]}  |  mrma.experiment/v4  |  {duration_ms:.0f} ms[/muted]")
     return exit_code
 
 
@@ -2101,6 +2177,17 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["standard", "strict", "forensic"],
         default="standard",
         help="Evidence redaction; forensic preserves target path and exact size/timing metadata",
+    )
+    experiment.add_argument(
+        "--assurance",
+        choices=["exploratory", "research", "forensic"],
+        help="Apply a coherent experiment policy preset; preset settings are authoritative",
+    )
+    experiment.add_argument(
+        "--evidence-write",
+        choices=["normal", "durable"],
+        default="normal",
+        help="Atomic evidence write mode; durable also syncs file and supported directories",
     )
     add_redirect_flags(experiment, default_follow=False)
     experiment.add_argument("--insecure", action="store_true", help="Disable TLS verification")

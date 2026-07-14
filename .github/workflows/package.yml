@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Container version tag, for example 0.3.2"
+        description: "Container version tag, for example 0.3.3"
         required: true
         type: string
 

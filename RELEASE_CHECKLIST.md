@@ -20,10 +20,14 @@
 - [ ] `mrma config --json` works
 - [ ] `mrma run --url https://example.com --follow-redirects` works
 - [ ] `mrma experiment` detects a deterministic local mutation
-- [ ] `mrma experiment --json` emits schema-valid `mrma.experiment/v3` without decoration
+- [ ] `mrma experiment --json` emits schema-valid `mrma.experiment/v4` without decoration
 - [ ] cookie state does not cross observations in default isolated mode
 - [ ] response limits and transport failures produce typed evidence instead of crashes
 - [ ] redirect and retry traces affect verdicts when final responses are identical
+- [ ] equivalent redirect targets and parsed response headers do not create false signals
+- [ ] retry error subtypes are decision-bearing while timing remains quantitative context
+- [ ] assurance presets, profiles, and structured limitations satisfy v4 cross-field constraints
+- [ ] durable evidence mode syncs the file and the parent directory where supported
 - [ ] every connection mode passes its state and pool-isolation tests
 - [ ] exit codes `10` and `11` match the documented `--fail-on` policy
 - [ ] unstable local controls produce `INCONCLUSIVE`

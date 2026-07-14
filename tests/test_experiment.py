@@ -114,6 +114,79 @@ def test_no_influence_requires_upper_confidence_bound():
     assert result.mutation_change_interval_95[1] <= 0.2
 
 
+def test_assurance_profile_does_not_compress_independent_dimensions():
+    baseline, mutated = mutation_pair()
+    result = run_experiment(
+        baseline,
+        mutated,
+        lambda _arm, _req: FakeResponse(b"same"),
+        ExperimentConfig(
+            rounds=20,
+            connection_mode="fresh-observation",
+            state_mode="isolated",
+            body_storage="full",
+            assurance_preset="research",
+        ),
+    )
+    exported = result.to_dict()
+    profile = exported["assurance_profile"]
+
+    assert "evidence_grade" not in exported
+    assert profile["statistical_decisiveness"] == "strong"
+    assert profile["control_stability"] == "strong"
+    assert profile["connection_independence"] == "strong"
+    assert profile["state_isolation"] == "strong"
+    assert profile["body_completeness"] == "complete"
+    assert [item["code"] for item in exported["limitations"]] == [
+        "SEMANTIC_HTTP_TRANSPORT"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected", "limited"),
+    [
+        ("reuse", "limited", True),
+        ("per-arm", "limited", True),
+        ("per-round", "moderate", True),
+        ("fresh-observation", "strong", False),
+    ],
+)
+def test_connection_assurance_and_limitations_cover_every_mode(mode, expected, limited):
+    baseline, mutated = mutation_pair()
+    exported = run_experiment(
+        baseline,
+        mutated,
+        lambda _arm, _req: FakeResponse(b"same"),
+        ExperimentConfig(rounds=20, connection_mode=mode),
+    ).to_dict()
+    codes = {item["code"] for item in exported["limitations"]}
+
+    assert exported["assurance_profile"]["connection_independence"] == expected
+    assert ("CONNECTION_REUSE" in codes) is limited
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected", "limited"),
+    [
+        ("isolated", "strong", False),
+        ("per-arm", "moderate", True),
+        ("shared-session", "limited", True),
+    ],
+)
+def test_state_assurance_and_limitations_cover_every_mode(mode, expected, limited):
+    baseline, mutated = mutation_pair()
+    exported = run_experiment(
+        baseline,
+        mutated,
+        lambda _arm, _req: FakeResponse(b"same"),
+        ExperimentConfig(rounds=20, state_mode=mode),
+    ).to_dict()
+    codes = {item["code"] for item in exported["limitations"]}
+
+    assert exported["assurance_profile"]["state_isolation"] == expected
+    assert ("RESPONSE_STATE_REUSE" in codes) is limited
+
+
 def test_header_only_influence_preserves_duplicate_values_without_exporting_them():
     baseline, mutated = mutation_pair()
 
@@ -193,6 +266,7 @@ def test_redirect_trace_is_decision_bearing_when_final_responses_match():
                     cross_origin=True,
                     method_changed=False,
                     credential_forwarding="stripped",
+                    resolved_target=f"{relay}/next",
                 ),
             ),
             final_origin="https://login.test",
@@ -210,13 +284,93 @@ def test_redirect_trace_is_decision_bearing_when_final_responses_match():
     assert result.verdict == "INFLUENCE_DETECTED"
     assert result.redirect_shift_rounds == result.rounds
     assert set(result.pairs[0].redirect_diffs) == {
-        "location-sequence",
+        "resolved-target-sequence",
         "target-origin-sequence",
     }
     assert exported["effect"]["redirect_shift_rounds"] == 20
     assert exported["observations"][1]["redirect_chain"][0][
-        "location_fingerprint"
+        "raw_location_fingerprint"
     ].startswith("hmac-sha256:")
+
+
+def test_raw_redirect_formatting_is_contextual_when_resolved_targets_match():
+    baseline, mutated = mutation_pair()
+    body = b"same"
+    digest = hashlib.sha256(body).hexdigest()
+
+    def response(arm: str) -> CapturedResponse:
+        raw_location = (
+            "https://EXAMPLE.test:443/a/../login" if arm == "mutation" else "/login"
+        )
+        return CapturedResponse(
+            status_code=200,
+            headers=(("content-type", "text/plain"),),
+            content=body,
+            body_length=len(body),
+            body_sha256=digest,
+            body_digest_complete=True,
+            body_retained_complete=True,
+            response_limit_exceeded=False,
+            redirect_chain=(
+                RedirectHop(
+                    status=302,
+                    method="GET",
+                    origin="https://example.test",
+                    target_origin="https://example.test",
+                    location=raw_location,
+                    cross_origin=False,
+                    method_changed=False,
+                    credential_forwarding="none",
+                    resolved_target="https://example.test/login",
+                ),
+            ),
+            final_origin="https://example.test",
+            http_version="HTTP/2",
+            final_url="https://example.test/login",
+        )
+
+    result = run_experiment(
+        baseline,
+        mutated,
+        lambda arm, _req: response(arm),
+        ExperimentConfig(rounds=20),
+    )
+
+    assert result.verdict == "NO_INFLUENCE_OBSERVED"
+    assert result.redirect_shift_rounds == 0
+    assert all(pair.redirect_diffs == () for pair in result.pairs)
+
+
+def test_location_response_header_uses_resolved_uri_semantics():
+    baseline, mutated = mutation_pair()
+    body = b"same"
+    digest = hashlib.sha256(body).hexdigest()
+
+    def response(arm: str) -> CapturedResponse:
+        location = "https://EXAMPLE.test:443/login" if arm == "mutation" else "/login"
+        return CapturedResponse(
+            status_code=302,
+            headers=(("content-type", "text/plain"), ("location", location)),
+            content=body,
+            body_length=len(body),
+            body_sha256=digest,
+            body_digest_complete=True,
+            body_retained_complete=True,
+            response_limit_exceeded=False,
+            redirect_chain=(),
+            final_origin="https://example.test",
+            final_url="https://example.test/start",
+        )
+
+    result = run_experiment(
+        baseline,
+        mutated,
+        lambda arm, _req: response(arm),
+        ExperimentConfig(rounds=20),
+    )
+
+    assert result.verdict == "NO_INFLUENCE_OBSERVED"
+    assert result.header_shift_counts == {}
 
 
 def test_mutation_only_intermediate_retries_are_decision_bearing():
@@ -251,6 +405,80 @@ def test_mutation_only_intermediate_retries_are_decision_bearing():
     assert [item.status for item in mutation.attempt_trace] == [503, 503, 200]
 
 
+def test_stable_retry_error_subtype_is_decision_bearing():
+    baseline, mutated = mutation_pair()
+
+    def outcome(error: Exception) -> SendOutcome:
+        response = FakeResponse(b"same")
+        trace = (
+            AttemptRecord(
+                attempt=1,
+                response=None,
+                error=error,
+                elapsed_ms=10.0,
+                retry_reason="transport-error",
+                backoff_ms=100.0,
+            ),
+            AttemptRecord(
+                attempt=2,
+                response=response,
+                error=None,
+                elapsed_ms=10.0,
+                retry_reason=None,
+                backoff_ms=None,
+            ),
+        )
+        return SendOutcome(response, None, 2, trace)
+
+    result = run_experiment(
+        baseline,
+        mutated,
+        lambda arm, _req: outcome(
+            httpx.ConnectTimeout("connect")
+            if arm == "mutation"
+            else httpx.ReadTimeout("read")
+        ),
+        ExperimentConfig(rounds=20),
+    )
+
+    assert result.verdict == "INFLUENCE_DETECTED"
+    assert "error-type-sequence" in result.pairs[0].attempt_diffs
+    assert result.outcome_counts[HTTP_RESPONSE] == 60
+
+
+def test_retry_timing_is_quantitative_context_not_a_one_shot_binary_signal():
+    baseline, mutated = mutation_pair()
+
+    def outcome(arm: str) -> SendOutcome:
+        response = FakeResponse(b"same")
+        trace = (
+            AttemptRecord(
+                attempt=1,
+                response=response,
+                error=None,
+                elapsed_ms=100.0 if arm == "mutation" else 10.0,
+                retry_reason=None,
+                backoff_ms=None,
+            ),
+        )
+        return SendOutcome(response, None, 1, trace)
+
+    result = run_experiment(
+        baseline,
+        mutated,
+        lambda arm, _req: outcome(arm),
+        ExperimentConfig(rounds=20),
+    )
+    timing = result.to_dict()["effect"]["retry_timing"]["attempt_elapsed"]
+
+    assert result.verdict == "NO_INFLUENCE_OBSERVED"
+    assert result.retry_shift_rounds == 0
+    assert timing["samples"] == 20
+    assert timing["median_delta"]["direction"] == "mutation-higher"
+    assert timing["direction_consistency"] == 1.0
+    assert timing["decision_role"] == "contextual"
+
+
 def test_preset_header_ignores_are_effective_in_the_experiment():
     baseline, mutated = mutation_pair()
     sequence = 0
@@ -274,6 +502,11 @@ def test_preset_header_ignores_are_effective_in_the_experiment():
     assert result.verdict == "NO_INFLUENCE_OBSERVED"
     assert "x-vercel-id" in result.effective_policy.ignore_headers
     assert result.header_shift_counts == {}
+    exported = result.to_dict()
+    assert exported["assurance_profile"]["normalization_risk"] == "elevated"
+    assert "ELEVATED_NORMALIZATION" in {
+        item["code"] for item in exported["limitations"]
+    }
 
 
 def test_experiment_rejects_unstable_controls_early():
@@ -343,7 +576,9 @@ def test_repeated_mutation_timeouts_can_be_signal_but_control_timeout_invalidate
         ExperimentConfig(max_rounds=20, seed=6),
     )
     assert mutation_result.verdict == "INFLUENCE_DETECTED"
-    assert mutation_result.evidence_grade == "moderate"
+    assert mutation_result.to_dict()["assurance_profile"]["transport_reproducibility"] == (
+        "moderate"
+    )
     assert mutation_result.outcome_counts[TIMEOUT] == mutation_result.rounds
     assert all(item.attempts == 3 for item in mutation_result.observations if item.arm == "mutation")
 
