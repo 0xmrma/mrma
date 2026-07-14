@@ -7,7 +7,7 @@ across a layered HTTP system, then helps reduce that signal to the smallest resp
 It is not a generic vulnerability scanner and it does not treat a one-off response difference as
 a finding.
 
-> Status: `0.3.6` research preview. `mrma experiment` has a conservative evidence contract;
+> Status: `0.3.7` research preview. `mrma experiment` has a conservative evidence contract;
 > legacy survey and minimization commands do not yet share this oracle.
 
 ## The flagship workflow
@@ -137,14 +137,14 @@ MRMA is published as a non-root multi-architecture container through GitHub Cont
 the Python base is pinned by OCI digest and build/runtime dependencies are exact and hash-verified.
 
 ```bash
-docker pull ghcr.io/0xmrma/mrma:0.3.6
-docker run --rm ghcr.io/0xmrma/mrma:0.3.6 --version
+docker pull ghcr.io/0xmrma/mrma:0.3.7
+docker run --rm ghcr.io/0xmrma/mrma:0.3.7 --version
 ```
 
 Run an authorized experiment from the container:
 
 ```bash
-docker run --rm ghcr.io/0xmrma/mrma:0.3.6 \
+docker run --rm ghcr.io/0xmrma/mrma:0.3.7 \
   experiment --url https://example.com --set-header "X-Test: 1"
 ```
 
