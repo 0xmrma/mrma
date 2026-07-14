@@ -10,6 +10,7 @@ from mrma.cli import (
     _emit_json_if_requested,
     _experiment_exit_code,
     _redacted_target_metadata,
+    _transport_provenance,
     _write_json_atomic,
 )
 from mrma.core.privacy import EvidenceRedactor
@@ -103,6 +104,7 @@ def test_research_assurance_preset_selects_independent_bounded_policies():
         body_storage="sample",
         schedule="balanced",
         rounds=None,
+        trust_environment=True,
     )
 
     assert _apply_assurance_preset(args) == "research"
@@ -113,6 +115,64 @@ def test_research_assurance_preset_selects_independent_bounded_policies():
     assert args.body_storage == "full"
     assert args.schedule == "bracketed"
     assert args.rounds == 20
+    assert args.trust_environment is False
+
+
+def test_transport_provenance_fingerprints_sensitive_inputs(monkeypatch):
+    for name in (
+        "ALL_PROXY",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "NO_PROXY",
+        "all_proxy",
+        "https_proxy",
+        "http_proxy",
+        "no_proxy",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "ssl_cert_file",
+        "ssl_cert_dir",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    with tempfile.TemporaryDirectory(prefix="mrma-transport-test-") as directory:
+        ca_bundle = Path(directory) / "approved.pem"
+        ca_bundle.write_bytes(b"approved-ca")
+        args = SimpleNamespace(
+            trust_environment=False,
+            insecure=False,
+            ca_bundle=str(ca_bundle),
+            proxy="http://user:secret@proxy.test:8080",
+        )
+
+        tls_mode, proxy_mode, evidence = _transport_provenance(
+            args, EvidenceRedactor(_key=b"a" * 32)
+        )
+
+        assert tls_mode == "custom-ca"
+        assert proxy_mode == "explicit"
+        assert evidence["tls"]["ca_fingerprint"].startswith("sha256:")
+        assert evidence["proxy"]["endpoint_fingerprint"].startswith("hmac-sha256:")
+        assert "secret" not in str(evidence)
+        assert str(ca_bundle) not in str(evidence)
+
+
+def test_environment_transport_is_opt_in_and_fingerprinted(monkeypatch):
+    monkeypatch.setenv("HTTPS_PROXY", "http://user:secret@proxy.test")
+    monkeypatch.setenv("SSL_CERT_FILE", "C:/private/company.pem")
+    args = SimpleNamespace(
+        trust_environment=True,
+        insecure=False,
+        ca_bundle=None,
+        proxy=None,
+    )
+
+    tls_mode, proxy_mode, evidence = _transport_provenance(
+        args, EvidenceRedactor(_key=b"a" * 32)
+    )
+
+    assert (tls_mode, proxy_mode) == ("environment", "environment")
+    assert "secret" not in str(evidence)
+    assert "company.pem" not in str(evidence)
 
 
 def test_durable_writer_syncs_file_before_replacement(monkeypatch):

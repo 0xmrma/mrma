@@ -5,6 +5,7 @@ from hypothesis import strategies as st
 from mrma.core.http_semantics import (
     canonical_header_values,
     canonical_uri,
+    content_type_media_type,
     header_semantic_ambiguities,
 )
 
@@ -89,6 +90,19 @@ def test_ambiguous_cache_control_preserves_duplicate_order_and_malformed_fields(
     )
     assert header_semantic_ambiguities("cache-control", first) == ("duplicate-directive",)
     assert header_semantic_ambiguities("cache-control", malformed) == ("malformed-syntax",)
+
+
+def test_content_type_requires_one_well_formed_declared_media_type():
+    assert content_type_media_type(()) is None
+    assert content_type_media_type(("Text/Plain; charset=utf-8",)) == "text/plain"
+    assert content_type_media_type(("text/plain", "application/json")) is None
+    assert content_type_media_type(("not-a-media-type",)) is None
+    assert header_semantic_ambiguities(
+        "content-type", ("text/plain", "application/json")
+    ) == ("multiple-values",)
+    assert header_semantic_ambiguities("content-type", ('text/plain; charset="',)) == (
+        "malformed-syntax",
+    )
 
 
 @given(

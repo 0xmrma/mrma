@@ -137,8 +137,11 @@ def test_assurance_profile_does_not_compress_independent_dimensions():
     assert profile["connection_independence"] == "strong"
     assert profile["state_isolation"] == "strong"
     assert profile["body_completeness"] == "complete"
+    assert profile["transport_integrity"] == "strong"
+    assert profile["response_header_coverage"] == "limited"
     assert [item["code"] for item in exported["limitations"]] == [
-        "SEMANTIC_HTTP_TRANSPORT"
+        "SELECTIVE_RESPONSE_HEADER_SCOPE",
+        "SEMANTIC_HTTP_TRANSPORT",
     ]
 
 
@@ -714,6 +717,138 @@ def test_binary_and_encoded_bodies_do_not_use_text_similarity():
     )
     assert encoded_result.verdict == "INCONCLUSIVE"
     assert encoded_result.mutation_indeterminate == encoded_result.rounds
+
+
+def test_missing_content_type_defaults_to_digest_only_evidence():
+    baseline, mutated = mutation_pair()
+
+    def changed_sender(arm: str, _req: RawRequest) -> FakeResponse:
+        body = b"mutation" if arm == "mutation" else b"control"
+        return FakeResponse(body, MultiHeaders([]))
+
+    changed = run_experiment(
+        baseline,
+        mutated,
+        changed_sender,
+        ExperimentConfig(max_rounds=20, seed=15),
+    )
+    unchanged = run_experiment(
+        baseline,
+        mutated,
+        lambda _arm, _req: FakeResponse(b"same", MultiHeaders([])),
+        ExperimentConfig(max_rounds=20, seed=16),
+    )
+
+    assert changed.verdict == "INCONCLUSIVE"
+    assert {pair.comparator for pair in changed.pairs} == {
+        "bracketed:bounded-incomplete/bounded-incomplete"
+    }
+    assert all(not item.body_comparator_eligible for item in changed.observations)
+    assert unchanged.verdict == "NO_INFLUENCE_OBSERVED"
+    assert unchanged.to_dict()["design"]["missing_content_type_policy"] == "digest-only"
+
+
+def test_missing_content_type_text_assumption_is_explicit_and_limited():
+    baseline, mutated = mutation_pair()
+
+    result = run_experiment(
+        baseline,
+        mutated,
+        lambda arm, _req: FakeResponse(
+            b"mutation" if arm == "mutation" else b"control", MultiHeaders([])
+        ),
+        ExperimentConfig(
+            max_rounds=20,
+            seed=17,
+            assume_text_without_content_type=True,
+        ),
+    )
+    exported = result.to_dict()
+
+    assert result.verdict == "INFLUENCE_DETECTED"
+    assert exported["design"]["missing_content_type_policy"] == "assume-text"
+    assert "UNDECLARED_CONTENT_TYPE_TEXT_ASSUMPTION" in {
+        item["code"] for item in exported["limitations"]
+    }
+
+
+def test_ambiguous_content_type_is_not_used_as_text_evidence():
+    baseline, mutated = mutation_pair()
+
+    result = run_experiment(
+        baseline,
+        mutated,
+        lambda arm, _req: FakeResponse(
+            b"mutation" if arm == "mutation" else b"control",
+            MultiHeaders(
+                [("content-type", "text/plain"), ("content-type", "application/json")]
+            ),
+        ),
+        ExperimentConfig(max_rounds=20, seed=18),
+    )
+
+    assert result.verdict == "INCONCLUSIVE"
+    assert all(not item.body_comparator_eligible for item in result.observations)
+    assert "AMBIGUOUS_CONTENT_TYPE" in {
+        item["code"] for item in result.to_dict()["limitations"]
+    }
+
+
+def test_exact_custom_response_header_can_be_made_decision_bearing():
+    baseline, mutated = mutation_pair()
+
+    def sender(arm: str, _req: RawRequest) -> FakeResponse:
+        tenant = "mutation" if arm == "mutation" else "control"
+        return FakeResponse(
+            b"same",
+            {"content-type": "text/plain", "x-tenant-route": tenant},
+        )
+
+    default_result = run_experiment(
+        baseline,
+        mutated,
+        sender,
+        ExperimentConfig(max_rounds=20, seed=21),
+    )
+    explicit_result = run_experiment(
+        baseline,
+        mutated,
+        sender,
+        ExperimentConfig(
+            max_rounds=20,
+            seed=21,
+            response_header_scope="explicit",
+            include_response_headers=("X-Tenant-Route",),
+        ),
+    )
+    design = explicit_result.to_dict()["design"]["response_header_policy"]
+
+    assert default_result.verdict == "NO_INFLUENCE_OBSERVED"
+    assert explicit_result.verdict == "INFLUENCE_DETECTED"
+    assert design["scope"] == "explicit"
+    assert "x-tenant-route" in design["decision_headers"]
+    assert design["omitted_headers_possible"] is True
+
+
+def test_transport_assurance_records_environment_and_disabled_tls_limitations():
+    baseline, mutated = mutation_pair()
+    exported = run_experiment(
+        baseline,
+        mutated,
+        lambda _arm, _req: FakeResponse(b"same"),
+        ExperimentConfig(
+            rounds=20,
+            trust_environment=True,
+            tls_verification="disabled",
+            proxy_mode="environment",
+        ),
+    ).to_dict()
+    codes = {item["code"] for item in exported["limitations"]}
+
+    assert exported["assurance_profile"]["transport_integrity"] == "limited"
+    assert exported["assurance_profile"]["transport_reproducibility"] == "moderate"
+    assert "TLS_VERIFICATION_DISABLED" in codes
+    assert "ENVIRONMENT_TRANSPORT_CONFIGURATION" in codes
 
 
 def test_status_only_change_can_be_decisive_or_allowed():

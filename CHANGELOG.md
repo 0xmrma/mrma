@@ -3,6 +3,30 @@
 All notable changes are documented here. MRMA follows semantic versioning for the CLI and uses an
 independent version in each machine-readable evidence schema.
 
+## Unreleased
+
+### Transport Reproducibility
+
+- Experiment transport now disables HTTPX environment trust by default and supports explicit proxy,
+  CA bundle, and environment opt-in policies. V5 evidence records TLS and proxy provenance without
+  exposing credentials, environment values, or file paths.
+- Research and forensic assurance disable environment trust and reject disabled TLS unless the
+  researcher supplies a separate explicit exception.
+
+### Evidence Precision
+
+- Missing, malformed, or conflicting `Content-Type` evidence is no longer assumed to be text.
+  Unequal bodies remain indeterminate unless an explicit weaker assumption is requested.
+- Exact target-specific response fields can be made decision-bearing. Results disclose the full
+  selected header set, omitted-header risk, and a response-header coverage assurance dimension.
+- Experiment evidence advances to strict `mrma.experiment/v5`; published v2, v3, and v4 contracts
+  remain packaged and immutable.
+
+### Verification
+
+- Added transport secrecy, body eligibility, custom-header, schema-negative, and v4 immutability
+  regressions. Runtime dependency auditing now runs independently on Python 3.10 and 3.13.
+
 ## 0.3.5 - 2026-07-14
 
 ### Dependency Contract

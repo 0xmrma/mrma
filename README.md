@@ -7,7 +7,7 @@ across a layered HTTP system, then helps reduce that signal to the smallest resp
 It is not a generic vulnerability scanner and it does not treat a one-off response difference as
 a finding.
 
-> Status: `0.3.5` research preview. `mrma experiment` has a conservative evidence contract;
+> Status: `0.3.5` research preview; `main` targets 0.3.6. `mrma experiment` has a conservative evidence contract;
 > legacy survey and minimization commands do not yet share this oracle.
 
 ## The flagship workflow
@@ -52,8 +52,9 @@ The result includes:
 - the effective normalization policy, state and connection modes, response bound, complete retry
   policy, negotiated HTTP versions, and stop reason;
 - a multidimensional assurance profile for statistical decisiveness, control stability,
-  connection independence, state isolation, body completeness, normalization risk, and transport
-  reproducibility, without a scalar confidence label;
+  connection independence, state isolation, body completeness, normalization risk, transport
+  reproducibility, transport integrity, and response-header coverage, without a scalar confidence
+  label;
 - structured limitation codes with severity, scope, explanation, and remediation;
 - a short run ID and evidence schema version.
 
@@ -74,9 +75,9 @@ mrma experiment \
   --fail-on any-signal
 ```
 
-The output declares `mrma.experiment/v4`; exit code `10` means influence and `11` means
-inconclusive when selected by `--fail-on`. The strict v4 JSON Schema defines every nested evidence
-object and cross-field assurance invariant. Published v2 and v3 schemas remain packaged and
+The output declares `mrma.experiment/v5`; exit code `10` means influence and `11` means
+inconclusive when selected by `--fail-on`. The strict v5 JSON Schema defines every nested evidence
+object and cross-field assurance invariant. Published v2, v3, and v4 schemas remain packaged and
 immutable for compatibility. The default exit code remains zero for all verdicts.
 The transport is labeled `semantic-http`; MRMA uses `httpx` and does not claim byte-for-byte HTTP/1
 wire reproduction.
@@ -85,6 +86,9 @@ Responses are streamed with a default 1 MiB read bound. `--body-storage sample` 
 KiB per observation. When full normalization cannot be performed, unequal digests are marked
 `INDETERMINATE`; they are never silently treated as equivalent. Encoded and non-text bodies use
 exact transfer-digest equality only until bounded, content-aware decoders are implemented.
+Responses without one unambiguous, well-formed `Content-Type` also use digest-only evidence by
+default. `--assume-text-without-content-type` is an explicit weaker assumption and emits a
+structured limitation.
 
 Retries are disabled by default. When enabled, every intermediate attempt, outcome class,
 error subtype, retry-triggering status, backoff, and final result is recorded. Stable error-subtype
@@ -99,7 +103,10 @@ fingerprint. Response fields use explicit semantics for `Vary`, `Allow`, CORS to
 `Cache-Control`, `Location`, and `Content-Location`. HTTP method tokens remain case-sensitive even
 when their list order is irrelevant. Duplicate directives or malformed `Cache-Control` syntax
 preserve ordered evidence and emit `AMBIGUOUS_CACHE_CONTROL`; captured fields without a registry
-rule and `Set-Cookie` remain conservative ordered evidence.
+rule and `Set-Cookie` remain conservative ordered evidence. The registry is intentionally
+selective: exact target-specific fields can be made decision-bearing with repeatable
+`--include-response-header`; the evidence records the complete selected set and an explicit
+coverage limitation.
 
 Connection scope is explicit: `reuse` (default), `per-arm`, `per-round`, or `fresh-observation`.
 Cookie state remains a separate policy. Wilson intervals assume repeated observations are suitably
@@ -108,8 +115,13 @@ authentication, HTTP/2 state, throttling, or WAF scoring could violate that assu
 
 For publication-oriented work, `--assurance research` authoritatively selects fresh connections,
 isolated response state, disabled retries, a 20-round bracketed design, standard privacy, and full
-body retention within the configured response bound. `exploratory` preserves efficient pooled
-behavior; `forensic` uses research isolation while intentionally retaining exact metadata.
+body retention within the configured response bound. It also disables HTTPX environment trust.
+Experiment transport ignores proxy and CA environment variables by default; opt in with
+`--trust-environment`, or use explicit `--proxy` and `--ca-bundle` inputs. Evidence stores only
+keyed proxy/environment fingerprints and the CA bundle digest, never proxy credentials, environment
+values, or file paths. Research and forensic presets reject `--insecure` unless the separate
+`--allow-insecure-research` exception is supplied and recorded. `exploratory` preserves efficient
+pooled behavior; `forensic` uses research isolation while intentionally retaining exact metadata.
 
 JSON output uses atomic replacement. Add `--evidence-write durable` to flush and synchronize the
 temporary file before replacement and synchronize the parent directory on platforms that support

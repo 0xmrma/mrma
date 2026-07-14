@@ -42,6 +42,23 @@ from .profiles.proxy_trust import default_proxy_trust_cases, run_proxy_trust_pro
 from .profiles.security_headers import audit_security_headers
 from .ui import console, print_home, verdict_style
 
+_PROXY_ENVIRONMENT_VARIABLES = (
+    "ALL_PROXY",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "NO_PROXY",
+    "all_proxy",
+    "https_proxy",
+    "http_proxy",
+    "no_proxy",
+)
+_TLS_ENVIRONMENT_VARIABLES = (
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "ssl_cert_file",
+    "ssl_cert_dir",
+)
+
 
 def _load_cfg_for_args(args):
     # args.no_config may not exist on some parsers; handle safely
@@ -169,7 +186,81 @@ def _apply_assurance_preset(args: argparse.Namespace) -> str:
         args.body_storage = "full"
         args.schedule = "bracketed"
         args.rounds = 20
+        args.trust_environment = False
     return preset
+
+
+def _configured_environment(names: tuple[str, ...]) -> dict[str, str]:
+    return {name: os.environ[name] for name in names if os.environ.get(name)}
+
+
+def _file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _transport_provenance(
+    args: argparse.Namespace,
+    redactor: EvidenceRedactor,
+) -> tuple[str, str, dict[str, object]]:
+    proxy_environment = (
+        _configured_environment(_PROXY_ENVIRONMENT_VARIABLES)
+        if args.trust_environment
+        else {}
+    )
+    tls_environment = (
+        _configured_environment(_TLS_ENVIRONMENT_VARIABLES)
+        if args.trust_environment
+        else {}
+    )
+
+    if args.insecure:
+        tls_verification = "disabled"
+        ca_fingerprint = None
+    elif args.ca_bundle:
+        tls_verification = "custom-ca"
+        ca_fingerprint = _file_sha256(args.ca_bundle)
+    elif tls_environment:
+        tls_verification = "environment"
+        ca_fingerprint = redactor.fingerprint(
+            json.dumps(tls_environment, sort_keys=True),
+            label="tls-environment",
+        )
+    else:
+        tls_verification = "system"
+        ca_fingerprint = None
+
+    if args.proxy:
+        proxy_mode = "explicit"
+        proxy_source = "cli"
+        endpoint_fingerprint = redactor.fingerprint(args.proxy, label="proxy-endpoint")
+    elif proxy_environment:
+        proxy_mode = "environment"
+        proxy_source = "environment"
+        endpoint_fingerprint = redactor.fingerprint(
+            json.dumps(proxy_environment, sort_keys=True),
+            label="proxy-environment",
+        )
+    else:
+        proxy_mode = "none"
+        proxy_source = "none"
+        endpoint_fingerprint = None
+
+    return tls_verification, proxy_mode, {
+        "trust_environment": args.trust_environment,
+        "tls": {
+            "verification": tls_verification,
+            "ca_fingerprint": ca_fingerprint,
+        },
+        "proxy": {
+            "mode": proxy_mode,
+            "source": proxy_source,
+            "endpoint_fingerprint": endpoint_fingerprint,
+        },
+    }
 
 def _apply_add_common(req, add_common: bool):
     if not add_common:
@@ -263,6 +354,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     )
 
     opts = SendOptions(
+        trust_env=True,
         timeout_s=args.timeout,
         follow_redirects=args.follow_redirects,
         verify_tls=(not args.insecure),
@@ -471,6 +563,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     req = _apply_add_common(req, args.add_common)
 
     opts = SendOptions(
+        trust_env=True,
         timeout_s=args.timeout,
         follow_redirects=args.follow_redirects,
         verify_tls=(not args.insecure),
@@ -618,6 +711,19 @@ def cmd_experiment(args: argparse.Namespace) -> int:
         raise SystemExit("Error: body_storage must be none, sample, or full")
     if args.redaction_policy not in {"standard", "strict", "forensic"}:
         raise SystemExit("Error: redaction_policy must be standard, strict, or forensic")
+    if args.insecure and args.ca_bundle:
+        raise SystemExit("Error: --insecure cannot be combined with --ca-bundle")
+    if args.allow_insecure_research and not args.insecure:
+        raise SystemExit("Error: --allow-insecure-research requires --insecure")
+    if (
+        assurance_preset in {"research", "forensic"}
+        and args.insecure
+        and not args.allow_insecure_research
+    ):
+        raise SystemExit(
+            "Error: research and forensic assurance reject --insecure; "
+            "repeat with --allow-insecure-research to record an explicit exception"
+        )
     if not 0.0 <= args.min_similarity <= 1.0:
         raise SystemExit("Error: --min-similarity must be between 0 and 1")
     if args.max_len_delta_ratio < 0.0:
@@ -661,6 +767,12 @@ def cmd_experiment(args: argparse.Namespace) -> int:
     except ValueError as exc:
         raise SystemExit(f"Error: {exc}") from exc
     redactor = EvidenceRedactor(policy=args.redaction_policy)
+    try:
+        tls_verification, proxy_mode, transport_provenance = _transport_provenance(
+            args, redactor
+        )
+    except OSError as exc:
+        raise SystemExit(f"Error: unable to read --ca-bundle: {exc}") from exc
     if not args.json and args.redaction_policy == "forensic":
         console.print(
             "[warning]Forensic evidence preserves clear target paths and exact size/timing metadata.[/warning]"
@@ -683,6 +795,12 @@ def cmd_experiment(args: argparse.Namespace) -> int:
         connection_mode=args.connection_mode,
         max_response_bytes=args.max_response_bytes,
         body_storage=args.body_storage,
+        response_header_scope=args.response_header_scope,
+        include_response_headers=tuple(args.include_response_header),
+        assume_text_without_content_type=args.assume_text_without_content_type,
+        trust_environment=args.trust_environment,
+        tls_verification=tls_verification,
+        proxy_mode=proxy_mode,
         assurance_preset=assurance_preset,
         redactor=redactor,
     )
@@ -690,6 +808,9 @@ def cmd_experiment(args: argparse.Namespace) -> int:
         timeout_s=args.timeout,
         follow_redirects=args.follow_redirects,
         verify_tls=(not args.insecure),
+        trust_env=args.trust_environment,
+        proxy=args.proxy,
+        ca_bundle=args.ca_bundle,
     )
     retry_values = [value.strip() for value in args.retry_status.split(",") if value.strip()]
     if any(not value.isdigit() for value in retry_values):
@@ -782,7 +903,7 @@ def cmd_experiment(args: argparse.Namespace) -> int:
     target_metadata = _redacted_target_metadata(base_url, baseline, redactor)
     result_payload = result.to_dict()
     payload = {
-        "schema_version": "mrma.experiment/v4",
+        "schema_version": "mrma.experiment/v5",
         "run": {
             "id": run_id,
             "started_at": redactor.run_timestamp(started_at),
@@ -813,6 +934,7 @@ def cmd_experiment(args: argparse.Namespace) -> int:
                     if item.http_version is not None
                 }
             ),
+            **transport_provenance,
             "retry_policy": {
                 "max_retries": policy.retries,
                 "retry_statuses": list(policy.retry_status),
@@ -987,6 +1109,7 @@ def cmd_diff(args: argparse.Namespace) -> int:
     apply_cfg_default(args, "min_similarity", 0.985, diff_def.get("min_similarity"))
     apply_cfg_default(args, "max_len_delta_ratio", 0.02, diff_def.get("max_len_delta_ratio"))
     opts = SendOptions(
+        trust_env=True,
         timeout_s=args.timeout,
         follow_redirects=args.follow_redirects,
         verify_tls=(not args.insecure),
@@ -1113,6 +1236,7 @@ def cmd_discover(args: argparse.Namespace) -> int:
     apply_cfg_default(args, "timeout", 15.0, disc_def.get("timeout"))
 
     opts = SendOptions(
+        trust_env=True,
         timeout_s=args.timeout,
         follow_redirects=args.follow_redirects,
         verify_tls=(not args.insecure),
@@ -1247,6 +1371,7 @@ def cmd_isolate(args: argparse.Namespace) -> int:
     apply_cfg_default(args, "timeout", 15.0, iso_def.get("timeout"))
 
     opts = SendOptions(
+        trust_env=True,
         timeout_s=args.timeout,
         follow_redirects=args.follow_redirects,
         verify_tls=(not args.insecure),
@@ -1354,6 +1479,7 @@ def cmd_isolate_remove(args: argparse.Namespace) -> int:
     apply_cfg_default(args, "delay", 0.0, isr_def.get("delay"))
 
     opts = SendOptions(
+        trust_env=True,
         timeout_s=args.timeout,
         follow_redirects=args.follow_redirects,
         verify_tls=(not args.insecure),
@@ -1446,6 +1572,7 @@ def cmd_impact(args: argparse.Namespace) -> int:
     apply_cfg_default(args, "pack_file_mode", "set", imp_def.get("pack_file_mode"))
 
     opts = SendOptions(
+        trust_env=True,
         timeout_s=args.timeout,
         follow_redirects=args.follow_redirects,
         verify_tls=(not args.insecure),
@@ -1632,6 +1759,7 @@ def cmd_profile_security_headers(args: argparse.Namespace) -> int:
     req = _apply_add_common(req, args.add_common)
 
     opts = SendOptions(
+        trust_env=True,
         timeout_s=args.timeout,
         follow_redirects=args.follow_redirects,
         verify_tls=(not args.insecure),
@@ -1705,6 +1833,7 @@ def cmd_profile_proxy_trust(args: argparse.Namespace) -> int:
     apply_cfg_default(args, "timeout", 15.0, px_def.get("timeout"))
 
     opts = SendOptions(
+        trust_env=True,
         timeout_s=args.timeout,
         follow_redirects=args.follow_redirects,
         verify_tls=(not args.insecure),
@@ -1855,6 +1984,7 @@ def cmd_profile_host_routing(args: argparse.Namespace) -> int:
     apply_cfg_default(args, "timeout", 15.0, hr_def.get("timeout"))
 
     opts = SendOptions(
+        trust_env=True,
         timeout_s=args.timeout,
         follow_redirects=args.follow_redirects,
         verify_tls=(not args.insecure),
@@ -2147,6 +2277,23 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Scrub a body regex before comparison (repeatable)",
     )
+    experiment.add_argument(
+        "--response-header-scope",
+        choices=["known", "explicit"],
+        default="known",
+        help="Use the built-in semantic header registry or only explicitly included fields",
+    )
+    experiment.add_argument(
+        "--include-response-header",
+        action="append",
+        default=[],
+        help="Add an exact response header to decision evidence (repeatable)",
+    )
+    experiment.add_argument(
+        "--assume-text-without-content-type",
+        action="store_true",
+        help="Explicitly allow undeclared response bodies into text comparison",
+    )
     experiment.add_argument("--timeout", type=float, default=15.0)
     experiment.add_argument(
         "--state-mode",
@@ -2191,6 +2338,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_redirect_flags(experiment, default_follow=False)
     experiment.add_argument("--insecure", action="store_true", help="Disable TLS verification")
+    experiment.add_argument(
+        "--allow-insecure-research",
+        action="store_true",
+        help="Allow and record disabled TLS under research or forensic assurance",
+    )
+    experiment.add_argument(
+        "--trust-environment",
+        action="store_true",
+        help="Allow HTTPX proxy and CA environment variables and record their use",
+    )
+    experiment.add_argument("--proxy", help="Explicit proxy URL; evidence stores only a keyed fingerprint")
+    experiment.add_argument("--ca-bundle", help="Explicit CA bundle; evidence stores only its SHA-256 digest")
     experiment.add_argument("--delay", type=float, default=0.0, help="Delay between requests")
     experiment.add_argument("--rps", type=float, default=0.0, help="Requests per second; 0 disables")
     experiment.add_argument("--retries", type=int, default=0, help="Retries for transient statuses")

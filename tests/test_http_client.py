@@ -2,6 +2,7 @@ import gzip
 import hashlib
 
 import httpx
+import pytest
 
 from mrma.core.http_client import SemanticHttpTransport, SendOptions
 from mrma.core.raw_request import RawRequest
@@ -13,7 +14,7 @@ def request(path: str = "/") -> RawRequest:
 
 def mock_transport(monkeypatch, state_mode: str, handler, *, follow_redirects: bool = False):
     transport = SemanticHttpTransport(
-        SendOptions(follow_redirects=follow_redirects),
+        SendOptions(trust_env=False, follow_redirects=follow_redirects),
         state_mode=state_mode,
     )
 
@@ -25,6 +26,54 @@ def mock_transport(monkeypatch, state_mode: str, handler, *, follow_redirects: b
 
     monkeypatch.setattr(transport, "_new_client", new_client)
     return transport
+
+
+def test_client_transport_inputs_are_explicit_and_environment_trust_defaults_off(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class DummyClient:
+        def close(self):
+            return None
+
+    def capture_client(**kwargs):
+        captured.update(kwargs)
+        return DummyClient()
+
+    monkeypatch.setattr("mrma.core.http_client.httpx.Client", capture_client)
+    transport = SemanticHttpTransport(
+        SendOptions(trust_env=False, proxy="http://proxy.test:8080")
+    )
+    transport._new_client()
+
+    assert captured["trust_env"] is False
+    assert captured["proxy"] == "http://proxy.test:8080"
+    assert captured["verify"] is True
+
+
+def test_custom_ca_uses_an_explicit_ssl_context_and_rejects_disabled_verification(
+    monkeypatch,
+):
+    captured: dict[str, object] = {}
+    marker = object()
+
+    class DummyClient:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "mrma.core.http_client.ssl.create_default_context",
+        lambda *, cafile: marker if cafile == "approved.pem" else None,
+    )
+    monkeypatch.setattr(
+        "mrma.core.http_client.httpx.Client",
+        lambda **kwargs: captured.update(kwargs) or DummyClient(),
+    )
+
+    SemanticHttpTransport(SendOptions(trust_env=False, ca_bundle="approved.pem"))._new_client()
+
+    assert captured["verify"] is marker
+    with pytest.raises(ValueError, match="cannot be combined"):
+        SendOptions(trust_env=False, verify_tls=False, ca_bundle="approved.pem")
 
 
 def test_isolated_mode_prevents_cookie_carryover_and_preserves_explicit_cookie(monkeypatch):
@@ -220,7 +269,7 @@ def test_connection_modes_create_the_declared_pool_scopes(monkeypatch):
     def exercise(mode: str) -> int:
         created = 0
         transport = SemanticHttpTransport(
-            SendOptions(),
+            SendOptions(trust_env=False),
             state_mode="isolated",
             connection_mode=mode,
         )
@@ -259,7 +308,7 @@ def test_connection_modes_create_the_declared_pool_scopes(monkeypatch):
 def test_fresh_connections_can_preserve_explicit_shared_cookie_state(monkeypatch):
     observed: list[str | None] = []
     transport = SemanticHttpTransport(
-        SendOptions(),
+        SendOptions(trust_env=False),
         state_mode="shared-session",
         connection_mode="fresh-observation",
     )

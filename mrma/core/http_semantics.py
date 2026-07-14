@@ -25,6 +25,12 @@ class _CacheControlAnalysis:
     ambiguities: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class _ContentTypeAnalysis:
+    media_type: str | None
+    ambiguities: tuple[str, ...] = ()
+
+
 def _normalize_percent_encoding(value: str) -> str:
     def replace(match: re.Match[str]) -> str:
         octet = int(match.group(1), 16)
@@ -182,10 +188,34 @@ def _cache_control(values: tuple[str, ...]) -> _CacheControlAnalysis:
     return _CacheControlAnalysis(canonical)
 
 
+def _content_type(values: tuple[str, ...]) -> _ContentTypeAnalysis:
+    if not values:
+        return _ContentTypeAnalysis(None)
+    fields, well_formed = _split_quoted_commas(values)
+    if not well_formed or not fields:
+        return _ContentTypeAnalysis(None, ("malformed-syntax",))
+    if len(fields) != 1:
+        return _ContentTypeAnalysis(None, ("multiple-values",))
+    media_type = fields[0].split(";", 1)[0].strip().lower()
+    parts = media_type.split("/")
+    if len(parts) != 2 or any(_TOKEN.fullmatch(part) is None for part in parts):
+        return _ContentTypeAnalysis(None, ("malformed-syntax",))
+    return _ContentTypeAnalysis(media_type)
+
+
+def content_type_media_type(values: tuple[str, ...]) -> str | None:
+    """Return one unambiguous declared media type, or None for absent/invalid evidence."""
+    analysis = _content_type(values)
+    return analysis.media_type if not analysis.ambiguities else None
+
+
 def header_semantic_ambiguities(name: str, values: tuple[str, ...]) -> tuple[str, ...]:
     """Return stable ambiguity reasons for fields that cannot be safely canonicalized."""
-    if name.lower() == "cache-control":
+    lowered = name.lower()
+    if lowered == "cache-control":
         return _cache_control(values).ambiguities
+    if lowered == "content-type":
+        return _content_type(values).ambiguities
     return ()
 
 

@@ -54,6 +54,23 @@ adding more mutation families.
 - [x] Signed annotated tag verification in every publishing workflow
 - [x] Protected release environment and verifiable Python/container provenance
 
+## 0.3.5 - Dependency contract consistency
+
+- [x] Align the Python 3.10 Tomli security floor across package and audit metadata
+- [x] Parse and compare published and audited PEP 508 dependency contracts in tests
+- [x] Validate Rich 15 and Actions Checkout 7 across the complete quality matrix
+
+## 0.3.6 - Transport and evidence precision
+
+- [x] Disable ambient HTTPX environment configuration for experiments by default
+- [x] Record privacy-preserving TLS, CA, proxy, and environment provenance
+- [x] Require an explicit exception for disabled TLS under research assurance
+- [x] Treat missing or ambiguous `Content-Type` as digest-only evidence by default
+- [x] Allow exact target-specific response headers into decision evidence
+- [x] Expose selective response-header coverage as a structured limitation and assurance dimension
+- [x] Publish strict `mrma.experiment/v5` while preserving v2, v3, and v4 contracts
+- [x] Audit runtime dependencies on Python 3.10 and 3.13 independently
+
 ## 0.4 - Authorization-first experiment engine
 
 - Enforce an authorization policy before any network operation, including every redirect
