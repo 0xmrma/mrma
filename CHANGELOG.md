@@ -3,7 +3,7 @@
 All notable changes are documented here. MRMA follows semantic versioning for the CLI and uses an
 independent version in each machine-readable evidence schema.
 
-## Unreleased
+## 0.3.6 - 2026-07-15
 
 ### Transport Reproducibility
 
