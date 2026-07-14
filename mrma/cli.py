@@ -6,7 +6,6 @@ import json
 import sys
 import time
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 from rich import box
@@ -14,7 +13,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from . import __version__
-from .core.compare import EquivalenceConfig, equivalent_response
+from .core.compare import EquivalenceConfig, equivalent_response, resolve_equivalence_policy
 from .core.config import cfg_defaults, default_config_paths, load_config
 from .core.discover import discover_required_headers
 from .core.experiment import ExperimentConfig, run_experiment
@@ -30,11 +29,12 @@ from .core.mutate import remove_header, set_header
 from .core.mutations import default_mutations
 from .core.pack_file import parse_pack_file
 from .core.packs import list_packs, mutations_for_pack
+from .core.privacy import EvidenceRedactor
 from .core.quick_request import build_request_from_url
 from .core.raw_request import RawRequest, parse_raw_http_request
 from .core.render import render_raw_request
 from .core.report import render_md_report, utc_now_iso
-from .core.sender import RateGate, SendPolicy, send_with_policy
+from .core.sender import RateGate, SendPolicy, send_with_policy, send_with_policy_outcome
 from .core.stability import measure_stability
 from .profiles.host_routing import default_host_routing_cases, run_host_routing_profile
 from .profiles.proxy_trust import default_proxy_trust_cases, run_proxy_trust_profile
@@ -156,27 +156,20 @@ def _apply_header_mutations(req: RawRequest, args) -> tuple[RawRequest, list[str
     return mutated, list(removed), set_names
 
 
-def _redacted_target_metadata(base_url: str, req: RawRequest) -> dict[str, object]:
-    origin_parts = urlsplit(base_url)
-    hostname = origin_parts.hostname or ""
-    display_host = f"[{hostname}]" if ":" in hostname else hostname
-    port = f":{origin_parts.port}" if origin_parts.port is not None else ""
-    origin = urlunsplit((origin_parts.scheme, f"{display_host}{port}", "", "", ""))
+def _redacted_target_metadata(
+    base_url: str,
+    req: RawRequest,
+    redactor: EvidenceRedactor | None = None,
+) -> dict[str, object]:
+    return (redactor or EvidenceRedactor()).target_metadata(base_url, req)
 
-    request_target = urlsplit(req.path)
-    path = request_target.path or "/"
-    query = request_target.query
-    metadata: dict[str, object] = {
-        "origin": origin,
-        "method": req.method,
-        "path": path,
-        "query_present": bool(query),
-    }
-    if query:
-        metadata["query_sha256"] = hashlib.sha256(
-            query.encode("utf-8", errors="replace")
-        ).hexdigest()
-    return metadata
+
+def _experiment_exit_code(verdict: str, fail_on: str) -> int:
+    if fail_on in {"influence", "any-signal"} and verdict == "INFLUENCE_DETECTED":
+        return 10
+    if fail_on in {"inconclusive", "any-signal"} and verdict == "INCONCLUSIVE":
+        return 11
+    return 0
 
 def cmd_config_show(args: argparse.Namespace) -> int:
     CFG = _load_cfg_for_args(args)
@@ -505,9 +498,22 @@ def cmd_experiment(args: argparse.Namespace) -> int:
     base_url, req = _load_request(args)
     cfg_data = _load_cfg_for_args(args)
     defaults = cfg_defaults(cfg_data, "experiment")
-    apply_cfg_default(args, "rounds", 5, defaults.get("rounds"))
+    if args.rounds is None and defaults.get("rounds") is not None:
+        args.rounds = int(defaults["rounds"])
+    apply_cfg_default(args, "min_rounds", 6, defaults.get("min_rounds"))
+    apply_cfg_default(args, "max_rounds", 20, defaults.get("max_rounds"))
     apply_cfg_default(args, "preset", "default", defaults.get("preset"))
     apply_cfg_default(args, "timeout", 15.0, defaults.get("timeout"))
+    apply_cfg_default(
+        args,
+        "max_response_bytes",
+        1024 * 1024,
+        defaults.get("max_response_bytes"),
+    )
+    apply_cfg_default(args, "body_storage", "sample", defaults.get("body_storage"))
+    apply_cfg_default(args, "state_mode", "isolated", defaults.get("state_mode"))
+    apply_cfg_default(args, "schedule", "bracketed", defaults.get("schedule"))
+    apply_cfg_default(args, "redaction_policy", "standard", defaults.get("redaction_policy"))
     apply_cfg_default(args, "min_similarity", 0.985, defaults.get("min_similarity"))
     apply_cfg_default(
         args,
@@ -523,6 +529,12 @@ def cmd_experiment(args: argparse.Namespace) -> int:
     )
     apply_cfg_default(
         args,
+        "no_influence_threshold",
+        0.2,
+        defaults.get("no_influence_threshold"),
+    )
+    apply_cfg_default(
+        args,
         "max_control_change_rate",
         0.2,
         defaults.get("max_control_change_rate"),
@@ -530,17 +542,49 @@ def cmd_experiment(args: argparse.Namespace) -> int:
     apply_cfg_list_default(args, "ignore_header", defaults.get("ignore_headers"))
     apply_cfg_list_default(args, "ignore_body_regex", defaults.get("ignore_body_regex"))
 
-    if not 3 <= args.rounds <= 100:
-        raise SystemExit("Error: --rounds must be between 3 and 100")
+    if args.rounds is not None and (
+        args.rounds < 6
+        or args.rounds > 50
+        or (args.schedule == "balanced" and args.rounds % 2)
+    ):
+        raise SystemExit("Error: --rounds must be 6-50 and even for a balanced schedule")
+    if args.rounds is None and (
+        args.min_rounds < 6
+        or args.max_rounds > 50
+        or args.min_rounds > args.max_rounds
+        or (args.schedule == "balanced" and args.min_rounds % 2)
+        or (args.schedule == "balanced" and args.max_rounds % 2)
+    ):
+        raise SystemExit(
+            "Error: round limits must be within 6-50 and even for a balanced schedule"
+        )
+    if args.schedule not in {"bracketed", "balanced"}:
+        raise SystemExit("Error: schedule must be bracketed or balanced")
+    if args.state_mode not in {"isolated", "per-arm", "shared-session"}:
+        raise SystemExit("Error: state_mode must be isolated, per-arm, or shared-session")
+    if args.body_storage not in {"none", "sample", "full"}:
+        raise SystemExit("Error: body_storage must be none, sample, or full")
+    if args.redaction_policy not in {"standard", "strict", "forensic"}:
+        raise SystemExit("Error: redaction_policy must be standard, strict, or forensic")
     if not 0.0 <= args.min_similarity <= 1.0:
         raise SystemExit("Error: --min-similarity must be between 0 and 1")
     if args.max_len_delta_ratio < 0.0:
         raise SystemExit("Error: --max-len-delta-ratio cannot be negative")
     if not 0.5 < args.min_reproducibility <= 1.0:
         raise SystemExit("Error: --min-reproducibility must be greater than 0.5 and at most 1")
+    if not 0.0 <= args.no_influence_threshold < 0.5:
+        raise SystemExit("Error: --no-influence-threshold must be at least 0 and less than 0.5")
+    if args.no_influence_threshold >= args.min_reproducibility:
+        raise SystemExit("Error: --no-influence-threshold must be below --min-reproducibility")
     if not 0.0 <= args.max_control_change_rate < 0.5:
         raise SystemExit("Error: --max-control-change-rate must be at least 0 and less than 0.5")
-    if args.timeout <= 0 or args.delay < 0 or args.rps < 0 or args.retries < 0:
+    if (
+        args.timeout <= 0
+        or args.delay < 0
+        or args.rps < 0
+        or args.retries < 0
+        or args.max_response_bytes <= 0
+    ):
         raise SystemExit("Error: timeout must be positive; delay, rps, and retries cannot be negative")
 
     baseline = _apply_add_common(req, args.add_common)
@@ -556,22 +600,43 @@ def cmd_experiment(args: argparse.Namespace) -> int:
         ignore_headers=tuple(args.ignore_header or []),
         ignore_body_regex=tuple(args.ignore_body_regex or []),
     )
+    try:
+        resolve_equivalence_policy(equivalence)
+    except ValueError as exc:
+        raise SystemExit(f"Error: {exc}") from exc
+    redactor = EvidenceRedactor(policy=args.redaction_policy)
+    if not args.json and args.redaction_policy == "forensic":
+        console.print(
+            "[warning]Forensic evidence preserves clear target paths and exact size/timing metadata.[/warning]"
+        )
+    if not args.json and args.state_mode == "shared-session":
+        console.print(
+            "[warning]Shared-session mode intentionally allows response cookies to cross observations.[/warning]"
+        )
     experiment_cfg = ExperimentConfig(
+        min_rounds=args.min_rounds,
+        max_rounds=args.max_rounds,
         rounds=args.rounds,
         min_reproducibility=args.min_reproducibility,
+        no_influence_threshold=args.no_influence_threshold,
         max_control_change_rate=args.max_control_change_rate,
         equivalence=equivalence,
+        seed=args.seed,
+        schedule_mode=args.schedule,
+        state_mode=args.state_mode,
+        max_response_bytes=args.max_response_bytes,
+        body_storage=args.body_storage,
+        redactor=redactor,
     )
     opts = SendOptions(
         timeout_s=args.timeout,
         follow_redirects=args.follow_redirects,
         verify_tls=(not args.insecure),
     )
-    retry_status = tuple(
-        int(value.strip())
-        for value in (args.retry_status.split(",") if args.retry_status else [])
-        if value.strip().isdigit()
-    )
+    retry_values = [value.strip() for value in args.retry_status.split(",") if value.strip()]
+    if any(not value.isdigit() for value in retry_values):
+        raise SystemExit("Error: --retry-status must be a comma-separated list of HTTP statuses")
+    retry_status = tuple(int(value) for value in retry_values)
     policy = SendPolicy(
         delay_s=args.delay,
         rps=args.rps,
@@ -583,11 +648,18 @@ def cmd_experiment(args: argparse.Namespace) -> int:
     started_at = utc_now_iso()
     timer = time.perf_counter()
 
-    with SemanticHttpTransport(opts) as transport:
+    with SemanticHttpTransport(opts, state_mode=args.state_mode) as transport:
 
-        def sender(request: RawRequest):
-            return send_with_policy(
-                lambda: transport.send(request, base_url),
+        def sender(arm: str, request: RawRequest):
+            state_arm = "control" if arm.startswith("control") else "mutation"
+            return send_with_policy_outcome(
+                lambda: transport.capture(
+                    request,
+                    base_url,
+                    state_arm,
+                    max_response_bytes=args.max_response_bytes,
+                    body_storage=args.body_storage,
+                ),
                 policy=policy,
                 gate=gate,
             )
@@ -596,7 +668,7 @@ def cmd_experiment(args: argparse.Namespace) -> int:
             result = run_experiment(baseline, mutated, sender, experiment_cfg)
         else:
             with console.status(
-                "[signal]Running counterbalanced control/mutation experiment[/signal]",
+                "[signal]Running confidence-bounded control/mutation experiment[/signal]",
                 spinner="dots12",
             ) as status:
 
@@ -614,9 +686,9 @@ def cmd_experiment(args: argparse.Namespace) -> int:
                 )
 
     duration_ms = round((time.perf_counter() - timer) * 1000, 3)
-    target_metadata = _redacted_target_metadata(base_url, baseline)
+    target_metadata = _redacted_target_metadata(base_url, baseline, redactor)
     payload = {
-        "schema_version": "mrma.experiment/v1",
+        "schema_version": "mrma.experiment/v2",
         "run": {
             "id": run_id,
             "started_at": started_at,
@@ -628,24 +700,32 @@ def cmd_experiment(args: argparse.Namespace) -> int:
             "mode": "semantic-http",
             "adapter": "httpx",
             "connection_reuse": True,
+            "state_mode": args.state_mode,
+            "schedule": args.schedule,
+            "redirects": "follow" if args.follow_redirects else "do-not-follow",
+        },
+        "privacy": {
+            "policy": args.redaction_policy,
+            "fingerprints": "per-run keyed HMAC-SHA256",
+            "cross_run_correlation": False,
         },
         "target": target_metadata,
         "mutation": {
-            "set_header_names": set_headers,
-            "removed_header_names": removed_headers,
+            "set_header_names": [redactor.header_name(name) for name in set_headers],
+            "removed_header_names": [redactor.header_name(name) for name in removed_headers],
             "values_redacted": True,
         },
-        "thresholds": {
-            "preset": args.preset,
-            "min_similarity": args.min_similarity,
-            "max_len_delta_ratio": args.max_len_delta_ratio,
-            "min_reproducibility": args.min_reproducibility,
-            "max_control_change_rate": args.max_control_change_rate,
+        "decision_policy": {
+            "influence_lower_bound": args.min_reproducibility,
+            "no_influence_upper_bound": args.no_influence_threshold,
+            "control_upper_bound": args.max_control_change_rate,
+            "confidence": 0.95,
         },
         "result": result.to_dict(),
     }
+    exit_code = _experiment_exit_code(result.verdict, args.fail_on)
     if _emit_json_if_requested(args, payload):
-        return 0
+        return exit_code
 
     style = verdict_style(result.verdict)
     heading = result.verdict.replace("_", " ")
@@ -654,7 +734,10 @@ def cmd_experiment(args: argparse.Namespace) -> int:
     summary = Table.grid(expand=True)
     summary.add_column()
     summary.add_column(justify="right")
-    summary.add_row(f"[{style}]{heading}[/{style}]", f"[bold]{result.evidence_grade.upper()} EVIDENCE[/bold]")
+    summary.add_row(
+        f"[{style}]{heading}[/{style}]",
+        f"[bold]{result.evidence_grade.upper()} CONFIDENCE GRADE[/bold]",
+    )
     summary.add_row(
         f"[muted]{baseline.method} {target_metadata['path']}[/muted]",
         f"[muted]{', '.join(mutation_names)}[/muted]",
@@ -677,22 +760,28 @@ def cmd_experiment(args: argparse.Namespace) -> int:
     evidence.add_row(
         "Mutation reproducibility",
         f"{result.mutation_changes}/{result.rounds} ({result.mutation_change_rate:.0%})",
-        f"95% interval {low:.0%}-{high:.0%}",
+        f"95% interval {low:.0%}-{high:.0%}; lower bound >= {args.min_reproducibility:.0%}",
     )
+    control_low, control_high = result.control_change_interval_95
     evidence.add_row(
         "Control instability",
         f"{result.control_changes}/{result.control_comparisons} ({result.control_change_rate:.0%})",
-        f"reject above {args.max_control_change_rate:.0%}",
+        f"95% interval {control_low:.0%}-{control_high:.0%}; upper bound <= {args.max_control_change_rate:.0%}",
     )
     evidence.add_row(
         "Similarity contrast",
-        f"{result.similarity_contrast:+.4f}",
+        f"{result.similarity_contrast:+.4f}" if result.similarity_contrast is not None else "n/a",
         "control median minus mutation median",
     )
     evidence.add_row(
         "Status shifts",
         f"{result.status_shift_rounds}/{result.rounds}",
         "paired control vs mutation",
+    )
+    evidence.add_row(
+        "Incomplete body pairs",
+        str(result.mutation_indeterminate),
+        "never silently classified as equivalent",
     )
     console.print(evidence)
 
@@ -704,8 +793,15 @@ def cmd_experiment(args: argparse.Namespace) -> int:
             )
         )
         console.print(f"[muted]Response header evidence:[/muted] {shifts}")
-    console.print(f"[muted]Run {run_id[:12]}  |  mrma.experiment/v1  |  {duration_ms:.0f} ms[/muted]")
-    return 0
+    schedule_detail = (
+        f"seed: {result.schedule_seed}" if result.schedule_seed is not None else "local brackets"
+    )
+    console.print(
+        f"[muted]Stop: {result.stop_reason}  |  state: {args.state_mode}  |  "
+        f"{schedule_detail}[/muted]"
+    )
+    console.print(f"[muted]Run {run_id[:12]}  |  mrma.experiment/v2  |  {duration_ms:.0f} ms[/muted]")
+    return exit_code
 
 
 def cmd_export(args: argparse.Namespace) -> int:
@@ -1804,10 +1900,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     experiment = sub.add_parser(
         "experiment",
-        help="Test one mutation with repeated, counterbalanced controls",
+        help="Test one mutation with confidence-bounded, balanced controls",
         description=(
-            "Run an interleaved AB/BA experiment and reject unstable evidence. "
-            "Header values are redacted from result metadata."
+            "Bracket each mutation with local controls, isolate response-cookie state by default, "
+            "and require fixed-sample confidence bounds for positive or negative verdicts."
         ),
     )
     experiment.add_argument("--config", help="Path to a config TOML file")
@@ -1833,7 +1929,34 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         help="Remove a mutation header by name (repeatable)",
     )
-    experiment.add_argument("--rounds", type=int, default=5, help="Paired rounds (3-100)")
+    experiment.add_argument(
+        "--rounds",
+        type=int,
+        help="Fixed paired rounds from 6-50; balanced schedules require an even value",
+    )
+    experiment.add_argument(
+        "--min-rounds",
+        type=int,
+        default=6,
+        help="Earliest round for rejecting invalid or unstable controls",
+    )
+    experiment.add_argument(
+        "--max-rounds",
+        type=int,
+        default=20,
+        help="Predeclared sample size for positive and negative decisions",
+    )
+    experiment.add_argument(
+        "--seed",
+        type=int,
+        help="Balanced-schedule seed; generated and recorded when omitted",
+    )
+    experiment.add_argument(
+        "--schedule",
+        choices=["bracketed", "balanced"],
+        default="bracketed",
+        help="Bracket each mutation with local controls (default) or use seeded AB/BA blocks",
+    )
     experiment.add_argument(
         "--preset",
         choices=["default", "dynamic", "nextjs", "api-json"],
@@ -1846,7 +1969,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--min-reproducibility",
         type=float,
         default=0.8,
-        help="Mutation change rate required for an influence verdict",
+        help="Influence verdict requires the 95%% lower bound to reach this value",
+    )
+    experiment.add_argument(
+        "--no-influence-threshold",
+        type=float,
+        default=0.2,
+        help="No-influence verdict requires the 95%% upper bound below this value",
     )
     experiment.add_argument(
         "--max-control-change-rate",
@@ -1872,6 +2001,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Scrub a body regex before comparison (repeatable)",
     )
     experiment.add_argument("--timeout", type=float, default=15.0)
+    experiment.add_argument(
+        "--state-mode",
+        choices=["isolated", "per-arm", "shared-session"],
+        default="isolated",
+        help="Response-cookie state model; isolated preserves only explicit request state",
+    )
+    experiment.add_argument(
+        "--max-response-bytes",
+        type=int,
+        default=1024 * 1024,
+        help="Hard streaming read bound per response",
+    )
+    experiment.add_argument(
+        "--body-storage",
+        choices=["none", "sample", "full"],
+        default="sample",
+        help="In-memory body retention within the hard response bound",
+    )
+    experiment.add_argument(
+        "--redaction-policy",
+        choices=["standard", "strict", "forensic"],
+        default="standard",
+        help="Evidence redaction; forensic preserves target path and exact size/timing metadata",
+    )
     add_redirect_flags(experiment, default_follow=False)
     experiment.add_argument("--insecure", action="store_true", help="Disable TLS verification")
     experiment.add_argument("--delay", type=float, default=0.0, help="Delay between requests")
@@ -1885,6 +2038,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     experiment.add_argument("--json", action="store_true", help="Emit versioned JSON evidence")
     experiment.add_argument("--out-json", help="Write JSON evidence to a file")
+    experiment.add_argument(
+        "--fail-on",
+        choices=["none", "influence", "inconclusive", "any-signal"],
+        default="none",
+        help="Automation exit policy (influence=10, inconclusive=11)",
+    )
     experiment.set_defaults(func=cmd_experiment)
 
     exp = sub.add_parser("export", help="Export current request as curl or raw HTTP")
@@ -2040,7 +2199,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     isr.set_defaults(func=cmd_isolate_remove)
     
-    imp = sub.add_parser("impact", help="Run a safe mutation set and rank what changes the response")
+    imp = sub.add_parser(
+        "impact", help="Run a conservative mutation set and rank response changes"
+    )
     imp.add_argument("--config", help="Path to a config TOML file")
     imp.add_argument("--no-config", action="store_true", help="Ignore config files")
     imp.add_argument("--request", "-r", help="Path to raw HTTP request file")
@@ -2107,7 +2268,7 @@ def build_parser() -> argparse.ArgumentParser:
     
     px = prof_sub.add_parser(
         "proxy-trust",
-        help="Detect whether the target trusts proxy/forwarded headers (safe)",
+        help="Detect whether the target trusts proxy/forwarded headers",
     )
     px.add_argument("--request", "-r", help="Path to raw HTTP request file")
     px.add_argument("--base-url", "-u", help="Base URL when using --request (e.g. https://example.com)")
@@ -2137,7 +2298,7 @@ def build_parser() -> argparse.ArgumentParser:
     
     hr = prof_sub.add_parser(
       "host-routing",
-      help="Detect whether the target trusts host-related headers (safe)",
+      help="Detect whether the target trusts host-related headers",
     )
     hr.add_argument("--request", "-r", help="Raw HTTP request file")
     hr.add_argument("--base-url", "-u", help="Base URL when using --request")

@@ -7,52 +7,69 @@ across a layered HTTP system, then helps reduce that signal to the smallest resp
 It is not a generic vulnerability scanner and it does not treat a one-off response difference as
 a finding.
 
-> Status: `0.3.0` research preview. The experiment workflow is ready for controlled evaluation;
-> the broader command set is still being migrated to the same evidence standard.
+> Status: `0.3.1` research preview. `mrma experiment` has a conservative evidence contract;
+> legacy survey and minimization commands do not yet share this oracle.
 
 ## The flagship workflow
 
-Test a single trust-boundary hypothesis with five unchanged controls and five mutations:
+Test a single trust-boundary hypothesis with a predeclared 20-round sample. Each mutation is
+locally bracketed by an unchanged control before and after it (60 requests at the default):
 
 ```bash
 mrma experiment \
   --url https://target.example/account \
   --set-header "X-Forwarded-Host: example.invalid" \
-  --rounds 5 \
   --preset dynamic
 ```
 
-MRMA counterbalances request order (`AB/BA`), reuses one semantic HTTP session, measures unchanged
-control drift, and returns one of three verdicts:
+MRMA isolates response-cookie state between observations by default, reuses transport connections,
+measures local control drift, and returns one of three verdicts:
 
-- `INFLUENCE_DETECTED`: the mutation crossed the configured threshold reproducibly.
-- `NO_INFLUENCE_OBSERVED`: no repeatable change was observed under this experiment.
+- `INFLUENCE_DETECTED`: the mutation's 95% lower confidence bound crossed the influence threshold.
+- `NO_INFLUENCE_OBSERVED`: its 95% upper bound stayed below the no-influence threshold.
 - `INCONCLUSIVE`: controls were unstable or mutation evidence was mixed.
+
+Neither influence nor no influence is a safety, exploitability, or severity claim.
 
 The result includes:
 
-- mutation reproducibility with a 95% Wilson interval;
-- control instability;
+- mutation reproducibility with a decision-bearing 95% Wilson interval;
+- independent control-before/control-after stability intervals;
 - control-versus-mutation similarity contrast;
-- status and meaningful response-header shifts;
+- typed transport outcomes, redirect chains, status shifts, and duplicate response-header evidence;
+- the effective normalization policy, state mode, response bound, retry attempts, and stop reason;
 - a short run ID and evidence schema version.
 
-Mutation values, URL credentials, query strings, and response-header values are redacted or hashed
-in result metadata. For automation, emit the complete versioned evidence object:
+The default privacy policy masks paths and internal hosts, buckets size/timing values, and uses a
+fresh per-run HMAC key for query, body, redirect, header-value, and normalization-rule
+fingerprints. Use `--redaction-policy strict` to mask header names too. `forensic` intentionally
+preserves clear target paths and exact size/timing metadata.
+
+For automation, emit the complete versioned evidence object and select an opt-in failure policy:
 
 ```bash
 mrma experiment \
   --url https://example.com \
   --set-header "X-Forwarded-For: 127.0.0.1" \
-  --json --out-json evidence.json
+  --json --out-json evidence.json \
+  --fail-on any-signal
 ```
 
-The output declares `mrma.experiment/v1` and labels the transport as `semantic-http`. MRMA currently
-uses `httpx`, so it does not claim byte-for-byte HTTP/1 wire reproduction.
+The output declares `mrma.experiment/v2`; exit code `10` means influence and `11` means
+inconclusive when selected by `--fail-on`. The default exit code remains zero for all verdicts.
+The transport is labeled `semantic-http`; MRMA uses `httpx` and does not claim byte-for-byte HTTP/1
+wire reproduction.
+
+Responses are streamed with a default 1 MiB read bound. `--body-storage sample` retains at most 64
+KiB per observation. When full normalization cannot be performed, unequal digests are marked
+`INDETERMINATE`; they are never silently treated as equivalent. Encoded and non-text bodies use
+exact transfer-digest equality only until bounded, content-aware decoders are implemented.
 
 ## Container package
 
-MRMA is published as a non-root multi-architecture container through GitHub Container Registry:
+The latest published container remains `0.3.0` until the `0.3.1` corrective release passes all
+release gates. MRMA is published as a non-root multi-architecture container through GitHub
+Container Registry:
 
 ```bash
 docker pull ghcr.io/0xmrma/mrma:0.3.0
@@ -126,10 +143,17 @@ timeout = 15.0
 preset = "dynamic"
 
 [experiment]
-rounds = 7
+min_rounds = 6
+max_rounds = 20
+schedule = "bracketed"
+state_mode = "isolated"
+max_response_bytes = 1048576
+body_storage = "sample"
+redaction_policy = "standard"
 min_similarity = 0.985
 max_len_delta_ratio = 0.02
 min_reproducibility = 0.8
+no_influence_threshold = 0.2
 max_control_change_rate = 0.2
 ignore_headers = ["x-request-id"]
 ```

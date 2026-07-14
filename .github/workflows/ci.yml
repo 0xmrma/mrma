@@ -16,8 +16,8 @@ jobs:
         python-version: ["3.10", "3.13"]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -31,3 +31,56 @@ jobs:
         run: python -m compileall -q mrma
       - name: CLI smoke
         run: mrma --version
+
+  evidence-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+      - name: Type check experiment core
+        run: >-
+          python -m mypy
+          mrma/core/compare.py
+          mrma/core/experiment.py
+          mrma/core/http_client.py
+          mrma/core/privacy.py
+          mrma/core/sender.py
+      - name: Coverage
+        run: >-
+          python -m pytest
+          --cov=mrma.core.compare
+          --cov=mrma.core.experiment
+          --cov=mrma.core.http_client
+          --cov=mrma.core.privacy
+          --cov=mrma.core.sender
+          --cov-report=term-missing
+          --cov-fail-under=85
+      - name: Runtime dependency audit
+        run: python -m pip_audit --requirement requirements-audit.txt
+
+  distribution:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: python -m pip install --upgrade pip build twine
+      - name: Build wheel and source distribution
+        run: python -m build
+      - name: Validate distribution metadata
+        run: python -m twine check dist/*
+      - name: Install built wheel in a clean environment
+        run: |
+          python -m venv /tmp/mrma-wheel
+          /tmp/mrma-wheel/bin/python -m pip install --upgrade pip
+          /tmp/mrma-wheel/bin/python -m pip install dist/*.whl
+          /tmp/mrma-wheel/bin/python -m pip check
+          cd /tmp
+          /tmp/mrma-wheel/bin/mrma --version
+          /tmp/mrma-wheel/bin/python -c "from importlib.resources import files; p=files('mrma.schemas').joinpath('experiment-v2.schema.json'); assert p.is_file(); assert 'site-packages' in str(p)"

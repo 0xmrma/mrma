@@ -1,0 +1,32 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  python-distribution:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Verify tag matches package version
+        run: python -c "import os; from mrma import __version__; expected=os.environ['GITHUB_REF_NAME'].removeprefix('v'); assert __version__ == expected, f'{__version__} != {expected}'"
+      - run: python -m pip install --upgrade pip build twine
+      - run: python -m build
+      - run: python -m twine check dist/*
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: dist/*
+      - name: Create GitHub release with Python distributions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "MRMA $GITHUB_REF_NAME"

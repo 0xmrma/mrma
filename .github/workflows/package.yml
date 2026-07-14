@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Container version tag, for example 0.3.0"
+        description: "Container version tag, for example 0.3.1"
         required: true
         type: string
 
@@ -29,6 +29,11 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Verify image tag matches package version
+        env:
+          EXPECTED_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+        run: python -c "import os; from mrma import __version__; expected=os.environ['EXPECTED_VERSION'].removeprefix('v'); assert __version__ == expected, f'{__version__} != {expected}'"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130

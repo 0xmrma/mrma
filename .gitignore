@@ -9,6 +9,7 @@ build/
 # Virtualenvs
 .venv/
 venv/
+.wheel-test/
 .env/
 
 # Test / tooling

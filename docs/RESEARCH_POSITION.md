@@ -22,7 +22,7 @@ not a claim that the listed tools cannot be extended beyond their documented pri
 | [mitmproxy](https://docs.mitmproxy.org/stable/overview/features/) | Programmable interception, transformation, recording, and replay | A built-in experimental method and evidence model |
 | [Turbo Intruder](https://github.com/PortSwigger/turbo-intruder) | High-throughput and complex request sequences with a custom stack | Low-rate, control-heavy research where reproducibility matters more than throughput |
 | [HTTP Request Smuggler](https://github.com/PortSwigger/http-request-smuggler) | Root-cause parser-discrepancy detection for desynchronization classes | Broader application, routing, identity, cache, and authorization trust influence |
-| [HTTP Garden](https://arxiv.org/abs/2405.17737) and [Gudifu](https://www.onarlioglu.com/publications/raid2024gudifu.pdf) | Differential fuzzing of HTTP implementations and parser discrepancies | Black-box experiments against deployed multi-layer behavior, with production-safe defaults |
+| [HTTP Garden](https://arxiv.org/abs/2405.17737) and [Gudifu](https://www.onarlioglu.com/publications/raid2024gudifu.pdf) | Differential fuzzing of HTTP implementations and parser discrepancies | Black-box experiments against deployed multi-layer behavior, with bounded conservative defaults |
 | [Delta Debugging](https://www.st.cs.uni-saarland.de/papers/tse2002/) | Automated isolation of minimal failure-inducing input | A stability-aware change oracle specialized for HTTP trust boundaries |
 
 ## The MRMA method
@@ -31,15 +31,16 @@ MRMA should treat every finding as an experiment, not an anomaly row:
 
 1. State a request-property hypothesis.
 2. Capture repeated unchanged controls.
-3. Interleave control and mutation observations using a counterbalanced schedule.
+3. Bracket each mutation with local controls, or explicitly select a seeded balanced schedule.
 4. Normalize only declared volatile fields.
 5. Reject the run when controls are unstable.
 6. Report reproducibility, uncertainty, and the concrete signals that changed.
 7. Minimize the responsible input using the same repeated oracle.
 8. Export a versioned evidence object that another engineer can replay and audit.
 
-Version 0.3 implements steps 1-6 for a single mutation in `mrma experiment`. Existing isolation
-commands implement early forms of step 7 but do not yet use the repeated experiment oracle.
+Version 0.3.1 implements steps 1-6 for a single mutation in `mrma experiment`, including explicit
+state modes, fixed-sample confidence decisions, typed transport outcomes, and bounded observations.
+Existing isolation commands implement early forms of step 7 but do not yet use this oracle.
 
 ## Defensible differentiation
 
@@ -65,7 +66,8 @@ a decision when black-box observations cannot establish it.
 - No “raw” label for requests normalized by a general HTTP library. Results declare their
   transport mode.
 - No positive verdict from one baseline and one mutation.
-- No hidden normalization. Every ignored field is part of result metadata.
+- No hidden normalization. The effective policy is part of result metadata; potentially sensitive
+  regex literals are HMAC-fingerprinted unless forensic evidence is explicitly selected.
 - No mutation values, URL credentials, query strings, or raw response-header values in default
   evidence artifacts; sensitive fields are omitted or fingerprinted.
 - No active testing outside targets the operator is authorized to assess.

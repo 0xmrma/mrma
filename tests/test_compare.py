@@ -1,4 +1,8 @@
-from mrma.core.compare import EquivalenceConfig, equivalent_response
+from mrma.core.compare import (
+    EquivalenceConfig,
+    equivalent_response,
+    resolve_equivalence_policy,
+)
 
 
 def test_equivalent_same_body():
@@ -24,3 +28,34 @@ def test_ignore_body_regex_makes_equivalent():
     b = b"token=ZZZ999\nok"
     r = equivalent_response(200, a, 200, b, cfg)
     assert r.equivalent is True
+
+
+def test_resolved_policy_merges_and_deduplicates_preset_rules():
+    policy = resolve_equivalence_policy(
+        EquivalenceConfig(
+            preset="nextjs",
+            ignore_headers=("X-Vercel-Id", "x-custom"),
+            ignore_body_regex=(r'"nonce"',),
+        )
+    )
+
+    assert policy.ignore_headers.count("x-vercel-id") == 1
+    assert "x-custom" in policy.ignore_headers
+    assert policy.ignore_body_regex
+
+
+def test_large_text_comparison_is_cpu_bounded():
+    body_a = b"a" * (256 * 1024 + 1)
+    body_b = b"b" * (256 * 1024 + 1)
+    result = equivalent_response(200, body_a, 200, body_b, EquivalenceConfig())
+    assert result.comparator == "bounded-size"
+    assert result.equivalent is False
+
+
+def test_invalid_body_ignore_regex_is_rejected():
+    try:
+        resolve_equivalence_policy(EquivalenceConfig(ignore_body_regex=("[",)))
+    except ValueError as exc:
+        assert "invalid ignore_body_regex" in str(exc)
+    else:
+        raise AssertionError("invalid regex was accepted")

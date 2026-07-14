@@ -15,6 +15,17 @@ class SendPolicy:
     backoff_cap_s: float = 4.0    # max backoff
 
 
+@dataclass(frozen=True)
+class SendOutcome:
+    response: object | None
+    error: Exception | None
+    attempts: int
+
+    @property
+    def succeeded(self) -> bool:
+        return self.error is None and self.response is not None
+
+
 class RateGate:
     def __init__(self) -> None:
         self._last_ts: float = 0.0
@@ -70,3 +81,31 @@ def send_with_policy(
         backoff = min(policy.backoff_cap_s, policy.backoff_base_s * (2 ** attempt))
         time.sleep(backoff)
         attempt += 1
+
+
+def send_with_policy_outcome(
+    send_once: Callable[[], object],
+    policy: SendPolicy,
+    gate: RateGate | None = None,
+) -> SendOutcome:
+    """Apply request policy and preserve the final response or transport exception as evidence."""
+    if gate is None:
+        gate = RateGate()
+
+    retry_statuses = set(policy.retry_status)
+    attempt = 0
+    while True:
+        gate.wait(policy)
+        attempt += 1
+        try:
+            response = send_once()
+        except Exception as exc:
+            if attempt > policy.retries:
+                return SendOutcome(response=None, error=exc, attempts=attempt)
+        else:
+            code = getattr(response, "status_code", None)
+            if attempt > policy.retries or code not in retry_statuses:
+                return SendOutcome(response=response, error=None, attempts=attempt)
+
+        backoff = min(policy.backoff_cap_s, policy.backoff_base_s * (2 ** (attempt - 1)))
+        time.sleep(backoff)

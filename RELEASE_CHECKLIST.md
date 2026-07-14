@@ -2,9 +2,13 @@
 
 ## Quality gates
 - [ ] `pytest` passes
+- [ ] branch coverage meets the configured floor
 - [ ] `ruff check mrma tests` passes
+- [ ] `mypy` passes for the experiment, transport, comparison, privacy, and sender core
 - [ ] `python -m compileall mrma` passes
-- [ ] clean virtualenv install succeeds with `pip install .`
+- [ ] wheel and sdist pass `twine check`
+- [ ] clean virtualenv installs the built wheel and passes `pip check`
+- [ ] `pip-audit` reports no known vulnerable runtime dependency
 - [ ] CI passes on Python 3.10 and 3.13 across Linux, Windows, and macOS
 
 ## Versioning
@@ -16,7 +20,10 @@
 - [ ] `mrma config --json` works
 - [ ] `mrma run --url https://example.com --follow-redirects` works
 - [ ] `mrma experiment` detects a deterministic local mutation
-- [ ] `mrma experiment --json` emits `mrma.experiment/v1` without terminal decoration
+- [ ] `mrma experiment --json` emits schema-valid `mrma.experiment/v2` without decoration
+- [ ] cookie state does not cross observations in default isolated mode
+- [ ] response limits and transport failures produce typed evidence instead of crashes
+- [ ] exit codes `10` and `11` match the documented `--fail-on` policy
 - [ ] unstable local controls produce `INCONCLUSIVE`
 - [ ] `mrma impact --url https://example.com --follow-redirects --top-deltas 5` works
 - [ ] `mrma report --url https://example.com --follow-redirects --top-deltas 10` writes `mrma_report.json` + `mrma_report.md`

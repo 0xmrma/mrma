@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/0xmrma/mrma/blob/main/mrma/schemas/experiment-v2.schema.json",
+  "title": "MRMA experiment evidence v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run",
+    "tool",
+    "transport",
+    "privacy",
+    "target",
+    "mutation",
+    "decision_policy",
+    "result"
+  ],
+  "properties": {
+    "schema_version": { "const": "mrma.experiment/v2" },
+    "run": {
+      "type": "object",
+      "required": ["id", "started_at", "completed_at", "duration_ms"],
+      "properties": {
+        "id": { "type": "string", "minLength": 12 },
+        "started_at": { "type": "string", "format": "date-time" },
+        "completed_at": { "type": "string", "format": "date-time" },
+        "duration_ms": { "type": "number", "minimum": 0 }
+      }
+    },
+    "tool": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "mrma" },
+        "version": { "type": "string" }
+      }
+    },
+    "transport": {
+      "type": "object",
+      "required": ["mode", "adapter", "connection_reuse", "state_mode", "schedule", "redirects"],
+      "properties": {
+        "mode": { "const": "semantic-http" },
+        "adapter": { "const": "httpx" },
+        "connection_reuse": { "type": "boolean" },
+        "state_mode": { "enum": ["isolated", "per-arm", "shared-session"] },
+        "schedule": { "enum": ["bracketed", "balanced"] },
+        "redirects": { "enum": ["follow", "do-not-follow"] }
+      }
+    },
+    "privacy": {
+      "type": "object",
+      "required": ["policy", "fingerprints", "cross_run_correlation"],
+      "properties": {
+        "policy": { "enum": ["standard", "strict", "forensic"] },
+        "fingerprints": { "const": "per-run keyed HMAC-SHA256" },
+        "cross_run_correlation": { "const": false }
+      }
+    },
+    "target": {
+      "type": "object",
+      "required": ["origin", "method", "path", "query_present"],
+      "properties": {
+        "origin": { "type": "string" },
+        "method": { "type": "string" },
+        "path": { "type": "string" },
+        "query_present": { "type": "boolean" },
+        "query_fingerprint": { "type": "string", "pattern": "^hmac-sha256:" }
+      }
+    },
+    "mutation": {
+      "type": "object",
+      "required": ["set_header_names", "removed_header_names", "values_redacted"],
+      "properties": {
+        "set_header_names": { "type": "array", "items": { "type": "string" } },
+        "removed_header_names": { "type": "array", "items": { "type": "string" } },
+        "values_redacted": { "const": true }
+      }
+    },
+    "decision_policy": {
+      "type": "object",
+      "required": [
+        "influence_lower_bound",
+        "no_influence_upper_bound",
+        "control_upper_bound",
+        "confidence"
+      ],
+      "properties": {
+        "influence_lower_bound": { "type": "number", "minimum": 0, "maximum": 1 },
+        "no_influence_upper_bound": { "type": "number", "minimum": 0, "maximum": 1 },
+        "control_upper_bound": { "type": "number", "minimum": 0, "maximum": 1 },
+        "confidence": { "const": 0.95 }
+      }
+    },
+    "result": {
+      "type": "object",
+      "required": [
+        "verdict",
+        "evidence_grade",
+        "stop_reason",
+        "design",
+        "effective_equivalence_policy",
+        "reproducibility",
+        "control_stability",
+        "effect",
+        "reasons",
+        "round_evidence",
+        "observations"
+      ],
+      "properties": {
+        "verdict": {
+          "enum": ["INFLUENCE_DETECTED", "NO_INFLUENCE_OBSERVED", "INCONCLUSIVE"]
+        },
+        "evidence_grade": { "enum": ["strong", "moderate", "limited"] },
+        "stop_reason": { "type": "string" },
+        "design": { "type": "object" },
+        "effective_equivalence_policy": { "type": "object" },
+        "reproducibility": { "type": "object" },
+        "control_stability": { "type": "object" },
+        "effect": { "type": "object" },
+        "reasons": { "type": "array", "items": { "type": "string" } },
+        "round_evidence": { "type": "array", "items": { "type": "object" } },
+        "observations": { "type": "array", "items": { "type": "object" } }
+      }
+    }
+  }
+}

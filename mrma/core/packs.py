@@ -14,7 +14,7 @@ class Pack:
 
 def list_packs() -> list[Pack]:
     return [
-        Pack("baseline", "Small safe set: UA/Accept/Accept-Language/Accept-Encoding toggles"),
+        Pack("baseline", "Small conservative set: UA/Accept/Accept-Language/Accept-Encoding toggles"),
         Pack("proxy", "Forwarded/proxy header influence tests (X-Forwarded-*, Forwarded, etc.)"),
         Pack("host", "Host-related header influence tests (X-Forwarded-Host, X-Original-Host, etc.)"),
         Pack("cache", "Cache-key and vary related toggles (Cache-Control, Pragma, If-None-Match, etc.)"),

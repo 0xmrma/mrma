@@ -1,14 +1,39 @@
 from dataclasses import replace
 
+import httpx
 import pytest
 
 from mrma.core.compare import EquivalenceConfig
-from mrma.core.experiment import ExperimentConfig, run_experiment, wilson_interval
+from mrma.core.experiment import (
+    DNS_ERROR,
+    HTTP_RESPONSE,
+    POLICY_ABORT,
+    TIMEOUT,
+    ExperimentConfig,
+    classify_transport_error,
+    run_experiment,
+    wilson_interval,
+)
+from mrma.core.http_client import CapturedResponse
 from mrma.core.raw_request import RawRequest
+from mrma.core.sender import SendOutcome
+
+
+class MultiHeaders:
+    def __init__(self, values: list[tuple[str, str]]):
+        self.values = values
+
+    def multi_items(self):
+        return list(self.values)
 
 
 class FakeResponse:
-    def __init__(self, body: bytes, headers: dict[str, str] | None = None, status: int = 200):
+    def __init__(
+        self,
+        body: bytes,
+        headers: dict[str, str] | MultiHeaders | None = None,
+        status: int = 200,
+    ):
         self.content = body
         self.headers = headers or {"content-type": "text/plain"}
         self.status_code = status
@@ -22,80 +47,363 @@ def has_probe(req: RawRequest) -> bool:
     return any(name.lower() == "x-probe" for name, _ in req.headers)
 
 
-def test_experiment_detects_reproducible_influence_and_counterbalances_order():
+def mutation_pair() -> tuple[RawRequest, RawRequest]:
     baseline = request()
-    mutated = replace(baseline, headers=baseline.headers + [("X-Probe", "1")])
+    return baseline, replace(baseline, headers=baseline.headers + [("X-Probe", "1")])
+
+
+def test_fixed_sample_brackets_mutation_and_requires_confidence_bounds():
+    baseline, mutated = mutation_pair()
     observed_arms: list[str] = []
 
-    def sender(req: RawRequest) -> FakeResponse:
-        changed = has_probe(req)
-        observed_arms.append("mutation" if changed else "control")
-        return FakeResponse(b"mutated response" if changed else b"control response")
+    def sender(arm: str, req: RawRequest) -> FakeResponse:
+        observed_arms.append(arm)
+        return FakeResponse(b"mutation" if has_probe(req) else b"control")
 
-    result = run_experiment(baseline, mutated, sender, ExperimentConfig(rounds=5))
-
-    assert result.verdict == "INFLUENCE_DETECTED"
-    assert result.evidence_grade == "strong"
-    assert result.mutation_change_rate == 1.0
-    assert result.control_change_rate == 0.0
-    assert observed_arms == [
-        "control",
-        "mutation",
-        "mutation",
-        "control",
-        "control",
-        "mutation",
-        "mutation",
-        "control",
-        "control",
-        "mutation",
-    ]
-
-
-def test_experiment_detects_header_only_influence():
-    baseline = request()
-    mutated = replace(baseline, headers=baseline.headers + [("X-Probe", "1")])
-
-    def sender(req: RawRequest) -> FakeResponse:
-        location = "/mutated" if has_probe(req) else "/control"
-        return FakeResponse(b"same body", {"content-type": "text/plain", "location": location})
-
-    result = run_experiment(baseline, mutated, sender, ExperimentConfig(rounds=5))
-
-    assert result.verdict == "INFLUENCE_DETECTED"
-    assert result.header_shift_counts == {"location": 5}
-    assert "/mutated" not in str(result.to_dict())
-    assert "evidence_header_fingerprints" in str(result.to_dict())
-
-
-def test_experiment_rejects_unstable_controls():
-    baseline = request()
-    mutated = replace(baseline, headers=baseline.headers + [("X-Probe", "1")])
-    control_count = 0
-
-    def sender(req: RawRequest) -> FakeResponse:
-        nonlocal control_count
-        if has_probe(req):
-            return FakeResponse(b"mutation")
-        control_count += 1
-        return FakeResponse(f"control variant {control_count}".encode())
-
-    cfg = ExperimentConfig(
-        rounds=5,
-        equivalence=EquivalenceConfig(min_similarity=0.999, max_len_delta_ratio=0.0),
+    result = run_experiment(
+        baseline,
+        mutated,
+        sender,
+        ExperimentConfig(max_rounds=20, seed=19),
     )
-    result = run_experiment(baseline, mutated, sender, cfg)
+
+    assert result.verdict == "INFLUENCE_DETECTED"
+    assert result.rounds == 20
+    assert result.mutation_change_interval_95[0] >= 0.8
+    assert result.control_change_interval_95[1] <= 0.2
+    assert result.stop_reason == "fixed_sample_complete"
+    assert observed_arms.count("control_before") == result.rounds
+    assert observed_arms.count("control_after") == result.rounds
+    assert observed_arms.count("mutation") == result.rounds
+    assert set(result.schedule) == {("control_before", "mutation", "control_after")}
+
+
+def test_six_of_six_changes_remain_inconclusive():
+    baseline, mutated = mutation_pair()
+
+    def sender(arm: str, _req: RawRequest) -> FakeResponse:
+        return FakeResponse(b"control" if arm.startswith("control") else b"mutation")
+
+    result = run_experiment(
+        baseline,
+        mutated,
+        sender,
+        ExperimentConfig(rounds=6, seed=1),
+    )
 
     assert result.verdict == "INCONCLUSIVE"
-    assert result.control_change_rate == 1.0
-    assert any("Control instability" in reason for reason in result.reasons)
+    assert result.mutation_change_rate == 1.0
+    assert result.mutation_change_interval_95[0] < 0.8
 
 
-def test_experiment_requires_three_rounds():
-    with pytest.raises(ValueError, match="at least 3 rounds"):
-        run_experiment(request(), request(), lambda _: FakeResponse(b"same"), ExperimentConfig(rounds=2))
+def test_no_influence_requires_upper_confidence_bound():
+    baseline, mutated = mutation_pair()
+
+    result = run_experiment(
+        baseline,
+        mutated,
+        lambda _arm, _req: FakeResponse(b"same"),
+        ExperimentConfig(max_rounds=20, seed=2),
+    )
+
+    assert result.verdict == "NO_INFLUENCE_OBSERVED"
+    assert result.rounds == 20
+    assert result.mutation_change_interval_95[1] <= 0.2
+
+
+def test_header_only_influence_preserves_duplicate_values_without_exporting_them():
+    baseline, mutated = mutation_pair()
+
+    def sender(arm: str, _req: RawRequest) -> FakeResponse:
+        suffix = "mutation-secret" if arm == "mutation" else "control-secret"
+        return FakeResponse(
+            b"same",
+            MultiHeaders(
+                [
+                    ("content-type", "text/plain"),
+                    ("location", "/shared"),
+                    ("location", f"/{suffix}"),
+                ]
+            ),
+        )
+
+    result = run_experiment(
+        baseline,
+        mutated,
+        sender,
+        ExperimentConfig(max_rounds=20, seed=3),
+    )
+    exported = result.to_dict()
+
+    assert result.verdict == "INFLUENCE_DETECTED"
+    assert result.header_shift_counts == {"location": result.rounds}
+    assert "mutation-secret" not in str(exported)
+    header_values = exported["observations"][0]["evidence_header_fingerprints"]["location"]
+    assert len(header_values) == 2
+
+
+def test_preset_header_ignores_are_effective_in_the_experiment():
+    baseline, mutated = mutation_pair()
+    sequence = 0
+
+    def sender(_arm: str, _req: RawRequest) -> FakeResponse:
+        nonlocal sequence
+        sequence += 1
+        return FakeResponse(b"same", {"x-vercel-id": f"secret-{sequence}"})
+
+    result = run_experiment(
+        baseline,
+        mutated,
+        sender,
+        ExperimentConfig(
+            max_rounds=20,
+            seed=4,
+            equivalence=EquivalenceConfig(preset="nextjs"),
+        ),
+    )
+
+    assert result.verdict == "NO_INFLUENCE_OBSERVED"
+    assert "x-vercel-id" in result.effective_policy.ignore_headers
+    assert result.header_shift_counts == {}
+
+
+def test_experiment_rejects_unstable_controls_early():
+    baseline, mutated = mutation_pair()
+    control_count = 0
+
+    def sender(arm: str, _req: RawRequest) -> FakeResponse:
+        nonlocal control_count
+        if arm == "mutation":
+            return FakeResponse(b"mutation")
+        control_count += 1
+        return FakeResponse(f"control-{control_count}".encode())
+
+    result = run_experiment(
+        baseline,
+        mutated,
+        sender,
+        ExperimentConfig(
+            max_rounds=20,
+            seed=5,
+            equivalence=EquivalenceConfig(min_similarity=0.999, max_len_delta_ratio=0.0),
+        ),
+    )
+
+    assert result.verdict == "INCONCLUSIVE"
+    assert result.stop_reason == "control_instability"
+    assert result.control_change_interval_95[0] > 0.2
+
+
+def test_local_control_drift_cannot_be_misattributed_to_mutation():
+    baseline, mutated = mutation_pair()
+
+    def sender(arm: str, _req: RawRequest) -> FakeResponse:
+        if arm == "control_before":
+            return FakeResponse(b"before")
+        return FakeResponse(b"after")
+
+    result = run_experiment(
+        baseline,
+        mutated,
+        sender,
+        ExperimentConfig(max_rounds=20, seed=50),
+    )
+
+    assert result.verdict == "INCONCLUSIVE"
+    assert result.mutation_changes == 0
+    assert result.mutation_indeterminate == result.rounds
+    assert result.stop_reason == "control_instability"
+
+
+def test_repeated_mutation_timeouts_can_be_signal_but_control_timeout_invalidates_run():
+    baseline, mutated = mutation_pair()
+
+    def mutation_timeout(arm: str, _req: RawRequest):
+        if arm == "mutation":
+            return SendOutcome(None, httpx.ReadTimeout("timed out"), 3)
+        return SendOutcome(FakeResponse(b"control"), None, 1)
+
+    mutation_result = run_experiment(
+        baseline,
+        mutated,
+        mutation_timeout,
+        ExperimentConfig(max_rounds=20, seed=6),
+    )
+    assert mutation_result.verdict == "INFLUENCE_DETECTED"
+    assert mutation_result.evidence_grade == "moderate"
+    assert mutation_result.outcome_counts[TIMEOUT] == mutation_result.rounds
+    assert all(item.attempts == 3 for item in mutation_result.observations if item.arm == "mutation")
+
+    def control_timeout(arm: str, _req: RawRequest):
+        if arm.startswith("control"):
+            return SendOutcome(None, httpx.ReadTimeout("timed out"), 1)
+        return FakeResponse(b"mutation")
+
+    control_result = run_experiment(
+        baseline,
+        mutated,
+        control_timeout,
+        ExperimentConfig(max_rounds=20, seed=7),
+    )
+    assert control_result.verdict == "INCONCLUSIVE"
+    assert control_result.stop_reason == "control_failure"
+
+
+def test_response_policy_abort_is_typed_evidence_and_incomplete_bodies_stay_indeterminate():
+    baseline, mutated = mutation_pair()
+
+    def captured(digest: str, *, exceeded: bool = False) -> CapturedResponse:
+        return CapturedResponse(
+            status_code=200,
+            headers=(("content-type", "text/plain"),),
+            content=b"sample",
+            body_length=1025 if exceeded else 100,
+            body_sha256=digest,
+            body_digest_complete=not exceeded,
+            body_retained_complete=False,
+            response_limit_exceeded=exceeded,
+            redirect_chain=(),
+            final_origin="https://example.test",
+        )
+
+    abort_result = run_experiment(
+        baseline,
+        mutated,
+        lambda arm, _req: captured("mutation", exceeded=True)
+        if arm == "mutation"
+        else FakeResponse(b"control"),
+        ExperimentConfig(max_rounds=20, seed=11),
+    )
+    assert abort_result.verdict == "INFLUENCE_DETECTED"
+    assert abort_result.outcome_counts[POLICY_ABORT] == abort_result.rounds
+
+    incomplete_result = run_experiment(
+        baseline,
+        mutated,
+        lambda arm, _req: captured("mutation" if arm == "mutation" else "control"),
+        ExperimentConfig(max_rounds=20, seed=12),
+    )
+    assert incomplete_result.verdict == "INCONCLUSIVE"
+    assert incomplete_result.mutation_indeterminate == incomplete_result.rounds
+
+
+def test_binary_and_encoded_bodies_do_not_use_text_similarity():
+    baseline, mutated = mutation_pair()
+
+    def binary_sender(arm: str, _req: RawRequest) -> FakeResponse:
+        body = b"\x00mutation" if arm == "mutation" else b"\x00control"
+        return FakeResponse(body, {"content-type": "application/octet-stream"})
+
+    binary_result = run_experiment(
+        baseline,
+        mutated,
+        binary_sender,
+        ExperimentConfig(max_rounds=20, seed=13),
+    )
+    assert binary_result.verdict == "INCONCLUSIVE"
+    assert binary_result.mutation_indeterminate == binary_result.rounds
+    assert {pair.comparator for pair in binary_result.pairs} == {"bracketed:bounded-incomplete/bounded-incomplete"}
+
+    def encoded_sender(arm: str, _req: RawRequest) -> FakeResponse:
+        body = b"encoded-mutation" if arm == "mutation" else b"encoded-control"
+        return FakeResponse(
+            body,
+            {"content-type": "text/plain", "content-encoding": "gzip"},
+        )
+
+    encoded_result = run_experiment(
+        baseline,
+        mutated,
+        encoded_sender,
+        ExperimentConfig(max_rounds=20, seed=14),
+    )
+    assert encoded_result.verdict == "INCONCLUSIVE"
+    assert encoded_result.mutation_indeterminate == encoded_result.rounds
+
+
+def test_status_only_change_can_be_decisive_or_allowed():
+    baseline, mutated = mutation_pair()
+
+    def sender(arm: str, _req: RawRequest) -> FakeResponse:
+        return FakeResponse(b"same", status=403 if arm == "mutation" else 200)
+
+    decisive = run_experiment(
+        baseline,
+        mutated,
+        sender,
+        ExperimentConfig(max_rounds=20, seed=8),
+    )
+    allowed = run_experiment(
+        baseline,
+        mutated,
+        sender,
+        ExperimentConfig(
+            max_rounds=20,
+            seed=8,
+            equivalence=EquivalenceConfig(require_same_status=False),
+        ),
+    )
+
+    assert decisive.verdict == "INFLUENCE_DETECTED"
+    assert allowed.verdict == "NO_INFLUENCE_OBSERVED"
+    assert allowed.status_shift_rounds == allowed.rounds
+
+
+def test_schedule_is_reproducible_and_requires_even_rounds():
+    baseline, mutated = mutation_pair()
+
+    def sender(arm: str, _req: RawRequest) -> FakeResponse:
+        return FakeResponse(b"control" if arm.startswith("control") else b"mutation")
+
+    config = ExperimentConfig(rounds=6, seed=99, schedule_mode="balanced")
+    first = run_experiment(baseline, mutated, sender, config)
+    second = run_experiment(baseline, mutated, sender, config)
+
+    assert first.schedule == second.schedule
+    with pytest.raises(ValueError, match="require even"):
+        run_experiment(
+            baseline,
+            mutated,
+            sender,
+            ExperimentConfig(rounds=7, schedule_mode="balanced"),
+        )
+
+
+def test_observation_export_records_http_outcome_and_hides_raw_body_hash():
+    baseline, mutated = mutation_pair()
+    result = run_experiment(
+        baseline,
+        mutated,
+        lambda _arm, _req: FakeResponse(b"same"),
+        ExperimentConfig(rounds=6, seed=10),
+    )
+    exported = result.to_dict()["observations"][0]
+
+    assert exported["outcome"] == HTTP_RESPONSE
+    assert exported["body_fingerprint"].startswith("hmac-sha256:")
+    assert "sha256" not in exported
+
+
+def test_experiment_requires_six_rounds():
+    with pytest.raises(ValueError, match="6-50 rounds"):
+        run_experiment(
+            request(),
+            request(),
+            lambda _arm, _req: FakeResponse(b"same"),
+            ExperimentConfig(rounds=4),
+        )
 
 
 def test_wilson_interval_contains_observed_rate():
     low, high = wilson_interval(4, 5)
     assert 0.0 < low < 0.8 < high < 1.0
+
+
+def test_nested_dns_error_is_classified_without_message_leakage():
+    try:
+        try:
+            raise OSError("wrapper") from __import__("socket").gaierror("private host")
+        except OSError as exc:
+            raise httpx.ConnectError("connect failed") from exc
+    except httpx.ConnectError as error:
+        assert classify_transport_error(error) == DNS_ERROR

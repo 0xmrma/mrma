@@ -12,7 +12,6 @@ MRMA_THEME = Theme(
         "brand": "bold bright_cyan",
         "signal": "bright_cyan",
         "muted": "grey58",
-        "safe": "green",
         "warning": "yellow",
         "danger": "bold red",
     }
@@ -42,8 +41,8 @@ def print_home(version: str) -> None:
     workflows.add_column("COMMAND", style="bold white", no_wrap=True, width=20)
     workflows.add_column("PURPOSE")
     workflows.add_row("ESTABLISH", "mrma run", "Capture a baseline or measure repeat stability")
-    workflows.add_row("PROVE", "mrma experiment", "Run counterbalanced controls and mutations")
-    workflows.add_row("SURVEY", "mrma impact", "Rank safe mutation families by response influence")
+    workflows.add_row("PROVE", "mrma experiment", "Bracket mutations with local controls")
+    workflows.add_row("SURVEY", "mrma impact", "Rank conservative mutation families by influence")
     workflows.add_row("MINIMIZE", "mrma isolate", "Reduce an influence signal to its smallest input")
     workflows.add_row("MODEL", "mrma profile", "Evaluate proxy, host-routing, and policy behavior")
     console.print(workflows)
@@ -52,7 +51,7 @@ def print_home(version: str) -> None:
 
 def verdict_style(verdict: str) -> str:
     if verdict == "INFLUENCE_DETECTED":
-        return "danger"
+        return "signal"
     if verdict == "NO_INFLUENCE_OBSERVED":
-        return "safe"
+        return "muted"
     return "warning"

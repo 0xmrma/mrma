@@ -15,13 +15,23 @@ adding more mutation families.
 - [x] Versioned `mrma.experiment/v1` JSON evidence
 - [x] Cross-platform CI and focused experiment tests
 
+## 0.3.1 - Correctness hardening
+
+- [x] Isolated, per-arm, and shared-session cookie-state modes
+- [x] Locally bracketed controls and fixed-sample confidence-bound verdicts
+- [x] Typed transport and policy-abort outcomes with retry provenance
+- [x] Streaming response bounds and explicit incomplete-body evidence
+- [x] Effective preset resolution and duplicate response-header preservation
+- [x] Redirect-chain provenance and per-run keyed evidence redaction
+- [x] Stable automation exit codes and `mrma.experiment/v2` JSON Schema
+- [x] Loopback integration tests and built-distribution release gates
+
 ## 0.4 - One experiment oracle
 
 - Integrate repeated controls into impact, profiles, discovery, and isolation
 - Replace first-sample baselines with robust baseline distributions
 - Add median absolute deviation for latency and length signals
-- Persist normalization rules and effective configuration in every result
-- Introduce JSON Schema files and compatibility tests
+- Extend schema compatibility tests to every legacy command as it adopts the experiment oracle
 - Split the CLI into command modules over a stable Python engine API
 
 ## 0.5 - Trust Influence Graph
