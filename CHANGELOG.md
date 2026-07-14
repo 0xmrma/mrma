@@ -3,6 +3,23 @@
 All notable changes are documented here. MRMA follows semantic versioning for the CLI and uses an
 independent version in each machine-readable evidence schema.
 
+## 0.3.5 - 2026-07-14
+
+### Dependency Contract
+
+- Published package metadata now requires Tomli 2.4.1 or newer on Python 3.10, matching the
+  runtime dependency audit and carrying the parser's bound on pathological key-part growth.
+- Added a parsed PEP 508 contract test requiring the runtime audit manifest to exactly match
+  published runtime dependencies, including version ranges and environment markers.
+
+### Maintenance And Supply Chain
+
+- Updated the supported Rich range to include Rich 15 and pinned Rich 15.0.0 in the reproducible
+  container dependency set. MRMA's Python 3.10 floor is compatible with the release.
+- Updated all workflow checkouts to the SHA-pinned Actions Checkout 7 release.
+- Raised the audit environment's Tomli floor to 2.4.1 and declared the requirement parser as an
+  explicit development dependency.
+
 ## 0.3.4 - 2026-07-14
 
 ### HTTP Semantic Correctness
