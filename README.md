@@ -67,19 +67,17 @@ exact transfer-digest equality only until bounded, content-aware decoders are im
 
 ## Container package
 
-The latest published container remains `0.3.0` until the `0.3.1` corrective release passes all
-release gates. MRMA is published as a non-root multi-architecture container through GitHub
-Container Registry:
+MRMA is published as a non-root multi-architecture container through GitHub Container Registry:
 
 ```bash
-docker pull ghcr.io/0xmrma/mrma:0.3.0
-docker run --rm ghcr.io/0xmrma/mrma:0.3.0 --version
+docker pull ghcr.io/0xmrma/mrma:0.3.1
+docker run --rm ghcr.io/0xmrma/mrma:0.3.1 --version
 ```
 
 Run an authorized experiment from the container:
 
 ```bash
-docker run --rm ghcr.io/0xmrma/mrma:0.3.0 \
+docker run --rm ghcr.io/0xmrma/mrma:0.3.1 \
   experiment --url https://example.com --set-header "X-Test: 1"
 ```
 
