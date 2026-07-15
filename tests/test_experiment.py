@@ -804,7 +804,6 @@ def test_ambiguous_content_type_is_not_used_as_text_evidence():
             "text/plain; charset=utf-8; charset=us-ascii",
             "conflicting-duplicate-parameter",
         ),
-        ("text/plain; charset=iso-8859-1", "unsupported-charset"),
     ],
 )
 def test_invalid_content_type_parameters_are_digest_only_with_precise_reasons(

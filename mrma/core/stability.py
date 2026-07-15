@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from difflib import SequenceMatcher
 
-from .compare import normalize_text
+from .compare import bounded_text_similarity, normalize_text
 
 
 @dataclass
@@ -25,7 +24,7 @@ class StabilityReport:
 
 
 def _sim(a: str, b: str) -> float:
-    return SequenceMatcher(None, a, b).ratio()
+    return bounded_text_similarity(a, b)
 
 
 def measure_stability(

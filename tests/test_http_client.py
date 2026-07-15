@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 from mrma.core.http_client import (
+    _GUARDED_TRANSPORT_CAPABILITY,
     SemanticHttpTransport,
     SendOptions,
     ssl_context_from_ca_bytes,
@@ -20,6 +21,7 @@ def mock_transport(monkeypatch, state_mode: str, handler, *, follow_redirects: b
     transport = SemanticHttpTransport(
         SendOptions(trust_env=False, follow_redirects=follow_redirects),
         state_mode=state_mode,
+        authorization_kernel=_GUARDED_TRANSPORT_CAPABILITY,
     )
 
     def new_client():
@@ -45,7 +47,8 @@ def test_client_transport_inputs_are_explicit_and_environment_trust_defaults_off
 
     monkeypatch.setattr("mrma.core.http_client.httpx.Client", capture_client)
     transport = SemanticHttpTransport(
-        SendOptions(trust_env=False, proxy="http://proxy.test:8080")
+        SendOptions(trust_env=False, proxy="http://proxy.test:8080"),
+        authorization_kernel=_GUARDED_TRANSPORT_CAPABILITY,
     )
     transport._new_client()
 
@@ -68,7 +71,8 @@ def test_prepared_ca_context_is_used_and_rejects_disabled_verification(monkeypat
     )
 
     SemanticHttpTransport(
-        SendOptions(trust_env=False, ssl_context=marker)
+        SendOptions(trust_env=False, ssl_context=marker),
+        authorization_kernel=_GUARDED_TRANSPORT_CAPABILITY,
     )._new_client()
 
     assert captured["verify"] is marker
@@ -116,7 +120,8 @@ def test_environment_change_during_client_construction_is_rejected(monkeypatch):
         SendOptions(
             trust_env=True,
             environment_snapshot=(("HTTPS_PROXY", None),),
-        )
+        ),
+        authorization_kernel=_GUARDED_TRANSPORT_CAPABILITY,
     )
 
     with pytest.raises(RuntimeError, match="HTTPS_PROXY"):
@@ -320,6 +325,7 @@ def test_connection_modes_create_the_declared_pool_scopes(monkeypatch):
             SendOptions(trust_env=False),
             state_mode="isolated",
             connection_mode=mode,
+            authorization_kernel=_GUARDED_TRANSPORT_CAPABILITY,
         )
 
         def new_client():
@@ -359,6 +365,7 @@ def test_fresh_connections_can_preserve_explicit_shared_cookie_state(monkeypatch
         SendOptions(trust_env=False),
         state_mode="shared-session",
         connection_mode="fresh-observation",
+        authorization_kernel=_GUARDED_TRANSPORT_CAPABILITY,
     )
 
     def handler(incoming: httpx.Request) -> httpx.Response:

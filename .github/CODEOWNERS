@@ -1,8 +1,12 @@
 # Security-sensitive control plane and corrected experiment core.
+/.github/CODEOWNERS @0xmrma
 /.github/workflows/ @0xmrma
 /.github/release-signers @0xmrma
+/mrma/ @0xmrma
 /mrma/core/ @0xmrma
 /mrma/schemas/ @0xmrma
+/tests/ @0xmrma
+/tools/ @0xmrma
 /Dockerfile @0xmrma
+/pyproject.toml @0xmrma
 /requirements-*.txt @0xmrma
-

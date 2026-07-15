@@ -21,18 +21,18 @@ code-owner approval; a sole maintainer cannot provide independent review.
 Install a current GitHub CLI, authenticate it, and verify the release before installation:
 
 ```bash
-gh release verify v0.3.7 -R 0xmrma/mrma
-gh release download v0.3.7 -R 0xmrma/mrma --pattern 'mrma-0.3.7-py3-none-any.whl'
-gh release verify-asset v0.3.7 ./mrma-0.3.7-py3-none-any.whl -R 0xmrma/mrma
+gh release verify v0.4.0 -R 0xmrma/mrma
+gh release download v0.4.0 -R 0xmrma/mrma --pattern 'mrma-0.4.0-py3-none-any.whl'
+gh release verify-asset v0.4.0 ./mrma-0.4.0-py3-none-any.whl -R 0xmrma/mrma
 ```
 
 Verify the container's GitHub-signed provenance and require the publishing workflow and tag ref:
 
 ```bash
-gh attestation verify oci://ghcr.io/0xmrma/mrma:0.3.7 \
+gh attestation verify oci://ghcr.io/0xmrma/mrma:0.4.0 \
   -R 0xmrma/mrma \
   --signer-workflow 0xmrma/mrma/.github/workflows/package.yml \
-  --source-ref refs/tags/v0.3.7
+  --source-ref refs/tags/v0.4.0
 ```
 
 The image also carries BuildKit provenance and SBOM manifests. Resolve the immutable OCI index
@@ -40,7 +40,7 @@ digest and pin deployments to `ghcr.io/0xmrma/mrma@sha256:...` rather than relyi
 mutable semantic-version tag:
 
 ```bash
-docker buildx imagetools inspect ghcr.io/0xmrma/mrma:0.3.7
+docker buildx imagetools inspect ghcr.io/0xmrma/mrma:0.4.0
 ```
 
 Verification establishes artifact identity and build origin. It does not replace source review,

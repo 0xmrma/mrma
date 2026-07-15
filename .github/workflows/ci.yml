@@ -41,7 +41,16 @@ jobs:
           python-version: "3.13"
           cache: pip
       - run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
-      - name: Type check experiment core
+      - name: Strict type check v0.4 modules
+        run: >-
+          python -m mypy --strict
+          mrma/benchmark.py
+          mrma/engine
+          mrma/evidence
+          mrma/policy
+          mrma/transport
+          mrma/workflows
+      - name: Type check corrected core
         run: >-
           python -m mypy
           mrma/core/compare.py
@@ -49,18 +58,43 @@ jobs:
           mrma/core/http_client.py
           mrma/core/http_semantics.py
           mrma/core/privacy.py
+          mrma/core/raw_request.py
           mrma/core/sender.py
-      - name: Coverage
+      - name: Whole-repository branch coverage
         run: >-
           python -m pytest
-          --cov=mrma.core.compare
-          --cov=mrma.core.experiment
-          --cov=mrma.core.http_client
-          --cov=mrma.core.http_semantics
-          --cov=mrma.core.privacy
-          --cov=mrma.core.sender
+          --cov=mrma
+          --cov-branch
           --cov-report=term-missing
-          --cov-fail-under=85
+          --cov-report=json:coverage.json
+      - name: Enforce corrected-core and v0.4 runtime coverage
+        run: python tools/check_critical_coverage.py coverage.json --minimum 90 --core-minimum 85
+
+  semantic-mutation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+      - name: Kill committed critical-policy mutation baseline
+        run: python tools/run_mutation_gate.py --json-output mutation-result.json
+
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+      - name: Validate packaged release baseline
+        run: python -m pytest tests/test_benchmark.py::test_packaged_release_benchmark_is_schema_valid_and_passed
+      - name: Run loopback expert benchmark
+        run: python -c "from mrma.cli import main; main()" benchmark --out-json benchmark-result.json
 
   runtime-audit:
     strategy:
@@ -108,7 +142,9 @@ jobs:
           /tmp/mrma-wheel/bin/python -m pip check
           cd /tmp
           /tmp/mrma-wheel/bin/mrma --version
-          /tmp/mrma-wheel/bin/python -c "from importlib.resources import files; root=files('mrma.schemas'); assert all(root.joinpath(f'experiment-v{v}.schema.json').is_file() for v in (2,3,4,5,6)); assert 'site-packages' in str(root)"
+          /tmp/mrma-wheel/bin/python -c "from importlib.resources import files; root=files('mrma.schemas'); assert all(root.joinpath(f'experiment-v{v}.schema.json').is_file() for v in (2,3,4,5,6,7)); assert root.joinpath('authorization-v1.schema.json').is_file(); assert root.joinpath('benchmark-v1.schema.json').is_file(); assert files('mrma').joinpath('benchmarks', 'release-baseline.json').is_file(); assert 'site-packages' in str(root)"
+          cd /tmp
+          /tmp/mrma-wheel/bin/python -c "import json; from importlib.resources import files; from mrma.evidence import validate_benchmark_document; validate_benchmark_document(json.loads(files('mrma').joinpath('benchmarks', 'release-baseline.json').read_text()))"
 
   container:
     runs-on: ubuntu-latest

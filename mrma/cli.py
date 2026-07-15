@@ -5,9 +5,12 @@ import hashlib
 import json
 import os
 import ssl
+import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 from uuid import uuid4
 
 from rich import box
@@ -15,16 +18,17 @@ from rich.panel import Panel
 from rich.table import Table
 
 from . import __version__
+from .benchmark import run_benchmark
 from .core.compare import EquivalenceConfig, equivalent_response, resolve_equivalence_policy
 from .core.config import cfg_defaults, default_config_paths, load_config
 from .core.discover import discover_required_headers
-from .core.experiment import ExperimentConfig, operating_characteristics, run_experiment
+from .core.experiment import ExperimentConfig, operating_characteristics
 from .core.export import to_curl, to_raw
 from .core.fingerprint import fingerprint_response
 from .core.header_sets import common_headers
 from .core.http_client import (
-    SemanticHttpTransport,
     SendOptions,
+    authorized_http_dispatch,
     send_raw_request,
     ssl_context_from_ca_bytes,
 )
@@ -38,15 +42,39 @@ from .core.pack_file import parse_pack_file
 from .core.packs import list_packs, mutations_for_pack
 from .core.privacy import EvidenceRedactor
 from .core.quick_request import build_request_from_url
-from .core.raw_request import RawRequest, parse_raw_http_request
+from .core.raw_request import RawRequest, parse_raw_http_request_bytes
 from .core.render import render_raw_request
 from .core.report import render_md_report, utc_now_iso
-from .core.sender import RateGate, SendPolicy, send_with_policy, send_with_policy_outcome
+from .core.sender import RateGate, SendPolicy, send_with_policy
 from .core.stability import measure_stability
+from .engine import ExperimentOracle, ExperimentPlan
+from .evidence import (
+    EvidenceIntegrityError,
+    EvidenceJournal,
+    create_evidence_bundle,
+    verify_evidence,
+)
+from .evidence.models import build_experiment_v7
+from .policy.authorization import (
+    AuthorizationError,
+    ManifestAuthorizationPolicy,
+    load_authorization_manifest,
+)
+from .policy.budget import BudgetError, BudgetLedger, BudgetLimits
+from .policy.comparison import ComparisonPolicy
 from .profiles.host_routing import default_host_routing_cases, run_host_routing_profile
 from .profiles.proxy_trust import default_proxy_trust_cases, run_proxy_trust_profile
 from .profiles.security_headers import audit_security_headers
+from .transport import SemanticHttpAdapter
 from .ui import console, print_home, verdict_style
+from .workflows import (
+    CandidateManifestError,
+    LegacyAuthorizedDispatcher,
+    build_candidate_manifest,
+    load_candidate,
+    request_identity,
+    write_candidate_manifest,
+)
 
 _PROXY_ENVIRONMENT_VARIABLES = (
     "ALL_PROXY",
@@ -64,6 +92,12 @@ _TLS_ENVIRONMENT_VARIABLES = (
     "ssl_cert_file",
     "ssl_cert_dir",
 )
+
+EXIT_AUTHORIZATION_REJECTED = 20
+EXIT_BUDGET_EXHAUSTED = 21
+EXIT_PARTIAL_RUN = 22
+EXIT_EVIDENCE_INTEGRITY = 23
+EXIT_COMPARATOR_RESOURCE = 24
 
 
 def _load_cfg_for_args(args):
@@ -108,8 +142,7 @@ def _load_request(args) -> tuple[str, RawRequest]:
       - else use --url (and auto-derive base_url)
     """
     if getattr(args, "request", None):
-        req_text = Path(args.request).read_text(encoding="utf-8", errors="replace")
-        req = parse_raw_http_request(req_text)
+        req = parse_raw_http_request_bytes(Path(args.request).read_bytes())
         if not getattr(args, "base_url", None):
             raise SystemExit("Error: when using --request, you must provide --base-url")
         return args.base_url, req
@@ -135,6 +168,27 @@ def _load_request(args) -> tuple[str, RawRequest]:
 def _emit_json_if_requested(args, payload) -> bool:
     if not getattr(args, "json", False):
         return False
+
+    if isinstance(payload, dict) and getattr(args, "_network_role", None) == "exploration":
+        payload.setdefault(
+            "execution_policy",
+            {
+                "role": "exploration",
+                "confirmatory": False,
+                "selection_affects_statistical_interpretation": True,
+                "authorization_digest": args._authorization_digest,
+                "journal_head_digest": args._journal.head_digest,
+            },
+        )
+        target = payload.get("target")
+        if isinstance(target, dict) and {"base_url", "method", "path"}.issubset(target):
+            redactor = args._redactor
+            payload["target"] = redactor.target_metadata(
+                str(target["base_url"]),
+                RawRequest(str(target["method"]), str(target["path"]), "HTTP/1.1", [], b""),
+            )
+        if "pack_file" in payload:
+            payload["pack_file_supplied"] = bool(payload.pop("pack_file"))
 
     # If --out is set, write JSON to file; else print to stdout
     out_path = getattr(args, "out_json", None)
@@ -172,6 +226,157 @@ def _write_json_atomic(destination: Path, payload: object, *, durable: bool) -> 
                 os.close(directory_fd)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _source_commit() -> str | None:
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parent.parent,
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = completed.stdout.strip().lower()
+    return value if completed.returncode == 0 and len(value) == 40 else None
+
+
+def _load_authorization_policy(path: str) -> ManifestAuthorizationPolicy:
+    try:
+        return ManifestAuthorizationPolicy(load_authorization_manifest(path))
+    except (OSError, AuthorizationError, ValueError) as exc:
+        raise SystemExit(f"Authorization rejected: {exc}") from exc
+
+
+@contextmanager
+def _legacy_network_scope(args: argparse.Namespace) -> Iterator[None]:
+    run_id = uuid4().hex
+    policy = _load_authorization_policy(args.authorization)
+    try:
+        limits = BudgetLimits.from_mapping(policy.manifest.budget)
+        journal = EvidenceJournal(
+            run_id=run_id,
+            privacy="standard",
+            path=args.journal,
+            mode=args.evidence_write,
+        )
+    except (OSError, BudgetError, ValueError) as exc:
+        raise SystemExit(f"Unable to initialize policy evidence: {exc}") from exc
+    ledger = BudgetLedger(limits, journal)
+    redactor = EvidenceRedactor(policy="standard")
+    dispatcher = LegacyAuthorizedDispatcher(
+        authorization=policy,
+        budgets=ledger,
+        evidence=journal,
+        redactor=redactor,
+    )
+    args._network_role = "exploration"
+    args._authorization_digest = policy.digest
+    args._journal = journal
+    args._redactor = redactor
+    journal.record(
+        "RUN_PLANNED",
+        {
+            "workflow": args.cmd,
+            "role": "exploration",
+            "manifest_digest": policy.digest,
+        },
+    )
+    if not getattr(args, "json", False):
+        console.print(
+            "[warning]Exploratory workflow: candidate ranking is not confirmatory evidence.[/warning]"
+        )
+    try:
+        with authorized_http_dispatch(dispatcher):
+            yield
+    except BaseException as exc:
+        journal.record(
+            "RUN_FAILED",
+            {"stop_reason": "workflow-failure", "error_type": type(exc).__name__},
+        )
+        raise
+    else:
+        journal.record(
+            "RUN_COMPLETED",
+            {"verdict": "EXPLORATORY_OUTPUT", "stop_reason": "workflow-complete"},
+        )
+    finally:
+        dispatcher.close()
+        journal.close()
+
+
+def cmd_authorization_validate(args: argparse.Namespace) -> int:
+    policy = _load_authorization_policy(args.path)
+    payload = {
+        "valid": True,
+        "authorization": policy.manifest.public_summary(),
+        "budget": dict(policy.manifest.budget),
+    }
+    if args.json:
+        print_json(payload)
+    else:
+        console.print("[success]Authorization manifest is valid.[/success]")
+        console.print(f"Digest: {policy.digest}")
+        console.print(f"Rules: {len(policy.manifest.rules)}")
+        console.print(f"Expires: {policy.manifest.expires_at.isoformat()}")
+    return 0
+
+
+def cmd_evidence_verify(args: argparse.Namespace) -> int:
+    result = verify_evidence(args.path)
+    if args.json:
+        print_json(result)
+    else:
+        console.print("[success]Evidence integrity and schema verification passed.[/success]")
+        console.print(f"Type: {result['schema_version']}")
+        if result.get("bundle_sha256"):
+            console.print(f"Bundle: {result['bundle_sha256']}")
+    return 0
+
+
+def cmd_benchmark(args: argparse.Namespace) -> int:
+    result = run_benchmark()
+    if args.out_json:
+        _write_json_atomic(Path(args.out_json), result, durable=False)
+    if args.json:
+        print_json(result)
+    else:
+        style = "success" if result["passed"] else "error"
+        console.print(
+            f"[{style}]Benchmark {'passed' if result['passed'] else 'failed'}:[/{style}] "
+            f"{result['case_count']} cases, {result['request_cost']} authorized attempts"
+        )
+        for item in result["cases"]:
+            marker = "PASS" if item["passed"] else "FAIL"
+            console.print(
+                f"{marker:4}  {item['name']}: {item['actual_verdict']} "
+                f"(expected {item['expected_verdict']})"
+            )
+    return 0 if result["passed"] else 1
+
+
+def _add_authorization_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--authorization",
+        required=True,
+        help="Path to a strict mrma.authorization/v1 manifest",
+    )
+    parser.add_argument(
+        "--journal",
+        required=True,
+        help="New path for the append-only observation journal",
+    )
+    if not any(action.dest == "evidence_write" for action in parser._actions):
+        parser.add_argument(
+            "--evidence-write",
+            choices=["normal", "durable"],
+            default="normal",
+            help="Journal write mode",
+        )
+    parser.set_defaults(_requires_authorization=True)
 
 
 def _apply_assurance_preset(args: argparse.Namespace) -> str:
@@ -381,7 +586,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     )
 
     opts = SendOptions(
-        trust_env=True,
+        trust_env=False,
         timeout_s=args.timeout,
         follow_redirects=args.follow_redirects,
         verify_tls=(not args.insecure),
@@ -590,7 +795,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     req = _apply_add_common(req, args.add_common)
 
     opts = SendOptions(
-        trust_env=True,
+        trust_env=False,
         timeout_s=args.timeout,
         follow_redirects=args.follow_redirects,
         verify_tls=(not args.insecure),
@@ -662,6 +867,14 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 def cmd_experiment(args: argparse.Namespace) -> int:
     base_url, req = _load_request(args)
+    setup_hooks = tuple(
+        parse_raw_http_request_bytes(Path(path).read_bytes())
+        for path in args.setup_request
+    )
+    reset_hooks = tuple(
+        parse_raw_http_request_bytes(Path(path).read_bytes())
+        for path in args.reset_request
+    )
     cfg_data = _load_cfg_for_args(args)
     defaults = cfg_defaults(cfg_data, "experiment")
     if args.rounds is None and defaults.get("rounds") is not None:
@@ -709,6 +922,12 @@ def cmd_experiment(args: argparse.Namespace) -> int:
     apply_cfg_list_default(args, "ignore_header", defaults.get("ignore_headers"))
     apply_cfg_list_default(args, "ignore_body_regex", defaults.get("ignore_body_regex"))
     assurance_preset = _apply_assurance_preset(args)
+
+    if args.trust_environment:
+        raise SystemExit(
+            "Error: v0.4 authorization-first transport rejects ambient HTTPX proxy/CA "
+            "configuration; use explicit --proxy or --ca-bundle"
+        )
 
     if args.rounds is not None and (
         args.rounds < 6
@@ -776,6 +995,31 @@ def cmd_experiment(args: argparse.Namespace) -> int:
     if args.evidence_write == "durable" and not args.out_json:
         raise SystemExit("Error: --evidence-write durable requires --out-json")
 
+    selected_candidate = None
+    if args.candidate_manifest:
+        if not args.candidate_id:
+            raise SystemExit("Error: --candidate-manifest requires --candidate-id")
+        if args.set_header or args.remove_header:
+            raise SystemExit(
+                "Error: candidate confirmation cannot be combined with ad hoc mutation flags"
+            )
+        try:
+            selected_candidate = load_candidate(args.candidate_manifest, args.candidate_id)
+        except CandidateManifestError as exc:
+            raise SystemExit(f"Error: {exc}") from exc
+        if selected_candidate.baseline_request_digest != request_identity(req):
+            raise SystemExit("Error: candidate manifest does not bind to this baseline request")
+        if assurance_preset not in {"research", "forensic"}:
+            raise SystemExit("Error: candidate confirmation requires research or forensic assurance")
+        if selected_candidate.remove_header is not None:
+            args.remove_header = [selected_candidate.remove_header]
+        else:
+            assert selected_candidate.set_header is not None
+            name, value = selected_candidate.set_header
+            args.set_header = [f"{name}: {value}"]
+    elif args.candidate_id:
+        raise SystemExit("Error: --candidate-id requires --candidate-manifest")
+
     baseline = _apply_add_common(req, args.add_common)
     mutated, removed_headers, set_headers = _apply_header_mutations(baseline, args)
     if not removed_headers and not set_headers:
@@ -828,6 +1072,10 @@ def cmd_experiment(args: argparse.Namespace) -> int:
         body_storage=args.body_storage,
         response_header_scope=args.response_header_scope,
         include_response_headers=tuple(args.include_response_header),
+        include_response_header_patterns=tuple(args.include_response_header_pattern),
+        exclude_response_headers=tuple(args.exclude_response_header),
+        response_header_profile=args.response_header_profile,
+        stable_header_control_observations=args.stable_header_controls,
         assume_text_without_content_type=args.assume_text_without_content_type,
         trust_environment=args.trust_environment,
         tls_verification=tls_verification,
@@ -848,16 +1096,21 @@ def cmd_experiment(args: argparse.Namespace) -> int:
     if any(not value.isdigit() for value in retry_values):
         raise SystemExit("Error: --retry-status must be a comma-separated list of HTTP statuses")
     retry_status = tuple(int(value) for value in retry_values)
-    policy = SendPolicy(
+    send_policy = SendPolicy(
         delay_s=args.delay,
         rps=args.rps,
         retries=args.retries,
         retry_status=retry_status or (429, 502, 503, 504),
     )
-    gate = RateGate()
     run_id = uuid4().hex
     started_at = utc_now_iso()
     timer = time.perf_counter()
+    authorization = _load_authorization_policy(args.authorization)
+    if (
+        selected_candidate is not None
+        and selected_candidate.authorization_digest != authorization.digest
+    ):
+        raise SystemExit("Error: candidate manifest was selected under different authorization")
 
     total_rounds = args.rounds or args.max_rounds
     requests_per_round = 3 if args.schedule == "bracketed" else 2
@@ -878,139 +1131,121 @@ def cmd_experiment(args: argparse.Namespace) -> int:
             f"{negative}/{total_rounds} changed."
         )
 
-    with SemanticHttpTransport(
+    journal = EvidenceJournal(
+        run_id=run_id,
+        privacy=args.redaction_policy,
+        path=args.journal,
+        mode=args.evidence_write,
+    )
+    budgets = BudgetLedger(BudgetLimits.from_mapping(authorization.manifest.budget), journal)
+    transport = SemanticHttpAdapter(
         opts,
+        journal=journal,
         state_mode=args.state_mode,
         connection_mode=args.connection_mode,
-    ) as transport:
+    )
+    exploration_role = "confirmation" if assurance_preset in {"research", "forensic"} else "exploration"
+    plan = ExperimentPlan(
+        baseline=baseline,
+        mutation=mutated,
+        base_url=base_url,
+        experiment=experiment_cfg,
+        send=send_policy,
+        follow_redirects=args.follow_redirects,
+        mutation_family="header",
+        mutation_risk_class="safe",
+        exploration_role=exploration_role,
+        candidate_manifest_digest=(
+            selected_candidate.manifest_digest if selected_candidate is not None else None
+        ),
+        setup_hooks=setup_hooks,
+        reset_hooks=reset_hooks,
+    )
+    oracle = ExperimentOracle(
+        authorization=authorization,
+        budgets=budgets,
+        transport=transport,
+        comparison=ComparisonPolicy(equivalence),
+        evidence=journal,
+    )
 
-        def sender(
-            arm: str,
-            request: RawRequest,
-            *,
-            round_index: int,
-            sequence: int,
-        ):
-            state_arm = "control" if arm.startswith("control") else "mutation"
-            outcome = send_with_policy_outcome(
-                lambda: transport.capture(
-                    request,
-                    base_url,
-                    state_arm,
-                    max_response_bytes=args.max_response_bytes,
-                    body_storage=args.body_storage,
-                    round_index=round_index,
-                ),
-                policy=policy,
-                gate=gate,
+    if args.dry_run:
+        try:
+            summary = oracle.dry_run(plan)
+            journal.record(
+                "RUN_COMPLETED",
+                {"verdict": "DRY_RUN_VALIDATED", "stop_reason": "plan-validation-complete"},
             )
-            if sequence % requests_per_round == 0:
-                transport.complete_round(round_index)
-            return outcome
+        finally:
+            journal.close()
+        dry_payload = {
+            "schema_version": "mrma.plan/v1",
+            "valid": True,
+            "network_attempts": 0,
+            "authorization": authorization.manifest.public_summary(),
+            "plan": summary.to_dict(),
+            "journal": {
+                "head_digest": journal.head_digest,
+                "event_count": len(journal.events),
+            },
+        }
+        if _emit_json_if_requested(args, dry_payload):
+            return 0
+        console.print("[success]Plan validated without networking.[/success]")
+        console.print(f"Plan digest: {summary.plan_digest}")
+        console.print(f"Maximum network attempts: {summary.maximum_attempts_with_redirects}")
+        console.print(f"Maximum estimated request bytes: {summary.maximum_request_bytes}")
+        console.print(f"Maximum response bytes: {summary.maximum_response_bytes}")
+        return 0
 
-        if args.json:
-            result = run_experiment(baseline, mutated, sender, experiment_cfg)
-        else:
-            with console.status(
-                "[signal]Running confidence-bounded control/mutation experiment[/signal]",
-                spinner="dots12",
-            ) as status:
+    if args.json:
+        oracle_result = oracle.run(plan)
+    else:
+        with console.status(
+            "[signal]Running authorization-enforced control/mutation experiment[/signal]",
+            spinner="dots12",
+        ) as status:
 
-                def update_progress(done: int, total: int, arm: str) -> None:
-                    status.update(
-                        f"[signal]Collecting evidence[/signal]  {done}/{total}  [muted]{arm}[/muted]"
-                    )
-
-                result = run_experiment(
-                    baseline,
-                    mutated,
-                    sender,
-                    experiment_cfg,
-                    on_progress=update_progress,
+            def update_progress(done: int, total: int, arm: str) -> None:
+                status.update(
+                    f"[signal]Collecting evidence[/signal]  {done}/{total}  [muted]{arm}[/muted]"
                 )
+
+            oracle_result = oracle.run(plan, on_progress=update_progress)
+    journal.close()
+    result = oracle_result.experiment
 
     duration_ms = round((time.perf_counter() - timer) * 1000, 3)
     completed_at = utc_now_iso()
-    public_duration = redactor.run_duration_ms(duration_ms)
     target_metadata = _redacted_target_metadata(base_url, baseline, redactor)
     result_payload = result.to_dict()
-    payload = {
-        "schema_version": "mrma.experiment/v6",
-        "run": {
-            "id": run_id,
-            "started_at": redactor.run_timestamp(started_at),
-            "completed_at": redactor.run_timestamp(completed_at),
-            "timestamp_precision": {
-                "standard": "minute",
-                "strict": "date",
-                "forensic": "exact",
-            }[args.redaction_policy],
-            "duration": {
-                "exact_ms": public_duration if isinstance(public_duration, float) else None,
-                "bucket": public_duration if isinstance(public_duration, str) else None,
-            },
-        },
-        "tool": {"name": "mrma", "version": __version__},
-        "transport": {
-            "mode": "semantic-http",
-            "adapter": "httpx",
-            "connection_reuse": args.connection_mode != "fresh-observation",
-            "connection_mode": args.connection_mode,
-            "state_mode": args.state_mode,
-            "schedule": args.schedule,
-            "redirects": "follow" if args.follow_redirects else "do-not-follow",
-            "http_versions": sorted(
-                {
-                    item.http_version
-                    for item in result.observations
-                    if item.http_version is not None
-                }
-            ),
-            **transport_provenance,
-            "retry_policy": {
-                "max_retries": policy.retries,
-                "retry_statuses": list(policy.retry_status),
-                "backoff_base_ms": round(policy.backoff_base_s * 1000, 3),
-                "backoff_cap_ms": round(policy.backoff_cap_s * 1000, 3),
-                "delay_ms": round(policy.delay_s * 1000, 3),
-                "rps": policy.rps,
-            },
-        },
-        "privacy": {
-            "policy": args.redaction_policy,
-            "fingerprints": "per-run keyed HMAC-SHA256",
-            "cross_run_correlation": False,
-        },
-        "evidence_storage": {
-            "sink": "file" if args.out_json else "stdout",
-            "write_mode": args.evidence_write if args.out_json else "stdout",
-            "file_sync": bool(args.out_json and args.evidence_write == "durable"),
-            "directory_sync": (
-                "performed"
-                if args.out_json
-                and args.evidence_write == "durable"
-                and _directory_sync_supported()
-                else "unsupported"
-                if args.out_json and args.evidence_write == "durable"
-                else "not-requested"
-            ),
-            "scope": "experiment-json-only",
-        },
-        "target": target_metadata,
-        "mutation": {
-            "set_header_names": [redactor.header_name(name) for name in set_headers],
-            "removed_header_names": [redactor.header_name(name) for name in removed_headers],
-            "values_redacted": True,
-        },
-        "decision_policy": {
-            "influence_lower_bound": args.min_reproducibility,
-            "no_influence_upper_bound": args.no_influence_threshold,
-            "control_upper_bound": args.max_control_change_rate,
-            "confidence": 0.95,
-        },
-        "result": result_payload,
-    }
-    exit_code = _experiment_exit_code(result.verdict, args.fail_on)
+    payload = build_experiment_v7(
+        oracle_result,
+        plan=plan,
+        authorization=authorization,
+        budgets=budgets,
+        journal=journal,
+        run_id=run_id,
+        started_at=started_at,
+        completed_at=completed_at,
+        duration_ms=duration_ms,
+        transport_configuration=transport_provenance,
+        source_commit=_source_commit(),
+        insecure_exception=bool(args.insecure and args.allow_insecure_research),
+    )
+    if args.bundle:
+        create_evidence_bundle(
+            args.bundle,
+            result=payload,
+            journal_path=args.journal,
+        )
+    comparator_failed = any(pair.comparator_resource_limit for pair in result.pairs)
+    if comparator_failed:
+        exit_code = EXIT_COMPARATOR_RESOURCE
+    elif oracle_result.status != "completed":
+        exit_code = EXIT_PARTIAL_RUN
+    else:
+        exit_code = _experiment_exit_code(result.verdict, args.fail_on)
     if _emit_json_if_requested(args, payload):
         return exit_code
 
@@ -1101,7 +1336,7 @@ def cmd_experiment(args: argparse.Namespace) -> int:
         f"[muted]Stop: {result.stop_reason}  |  state: {args.state_mode}  |  "
         f"{schedule_detail}[/muted]"
     )
-    console.print(f"[muted]Run {run_id[:12]}  |  mrma.experiment/v4  |  {duration_ms:.0f} ms[/muted]")
+    console.print(f"[muted]Run {run_id[:12]}  |  mrma.experiment/v7  |  {duration_ms:.0f} ms[/muted]")
     return exit_code
 
 
@@ -1141,7 +1376,7 @@ def cmd_diff(args: argparse.Namespace) -> int:
     apply_cfg_default(args, "min_similarity", 0.985, diff_def.get("min_similarity"))
     apply_cfg_default(args, "max_len_delta_ratio", 0.02, diff_def.get("max_len_delta_ratio"))
     opts = SendOptions(
-        trust_env=True,
+        trust_env=False,
         timeout_s=args.timeout,
         follow_redirects=args.follow_redirects,
         verify_tls=(not args.insecure),
@@ -1268,7 +1503,7 @@ def cmd_discover(args: argparse.Namespace) -> int:
     apply_cfg_default(args, "timeout", 15.0, disc_def.get("timeout"))
 
     opts = SendOptions(
-        trust_env=True,
+        trust_env=False,
         timeout_s=args.timeout,
         follow_redirects=args.follow_redirects,
         verify_tls=(not args.insecure),
@@ -1403,7 +1638,7 @@ def cmd_isolate(args: argparse.Namespace) -> int:
     apply_cfg_default(args, "timeout", 15.0, iso_def.get("timeout"))
 
     opts = SendOptions(
-        trust_env=True,
+        trust_env=False,
         timeout_s=args.timeout,
         follow_redirects=args.follow_redirects,
         verify_tls=(not args.insecure),
@@ -1511,7 +1746,7 @@ def cmd_isolate_remove(args: argparse.Namespace) -> int:
     apply_cfg_default(args, "delay", 0.0, isr_def.get("delay"))
 
     opts = SendOptions(
-        trust_env=True,
+        trust_env=False,
         timeout_s=args.timeout,
         follow_redirects=args.follow_redirects,
         verify_tls=(not args.insecure),
@@ -1604,7 +1839,7 @@ def cmd_impact(args: argparse.Namespace) -> int:
     apply_cfg_default(args, "pack_file_mode", "set", imp_def.get("pack_file_mode"))
 
     opts = SendOptions(
-        trust_env=True,
+        trust_env=False,
         timeout_s=args.timeout,
         follow_redirects=args.follow_redirects,
         verify_tls=(not args.insecure),
@@ -1646,6 +1881,32 @@ def cmd_impact(args: argparse.Namespace) -> int:
         muts = default_mutations()
 
     rows = run_impact(req, sender, cfg, muts)
+    rank_by_name = {row.name: rank for rank, row in enumerate(rows, start=1)}
+    candidate_manifest = build_candidate_manifest(
+        req,
+        muts,
+        authorization_digest=args._authorization_digest,
+        rank_by_name=rank_by_name,
+    )
+    candidate_path = Path(args.candidate_out) if args.candidate_out else Path(
+        args.journal
+    ).with_suffix(".candidates.json")
+    try:
+        write_candidate_manifest(candidate_path, candidate_manifest)
+    except (OSError, CandidateManifestError) as exc:
+        raise SystemExit(f"Error: unable to write candidate manifest: {exc}") from exc
+    candidate_summary = {
+        "schema_version": candidate_manifest["schema_version"],
+        "digest": candidate_manifest["digest"],
+        "candidate_count": len(candidate_manifest["candidates"]),
+        "selection_affects_statistical_interpretation": True,
+        "confirmatory": False,
+    }
+    if not args.json:
+        console.print(
+            f"[muted]Candidate manifest: {candidate_path} ({candidate_manifest['digest']})[/muted]"
+        )
+
     def _impact_rows_to_json(rows_):
         return [
             {
@@ -1681,6 +1942,7 @@ def cmd_impact(args: argparse.Namespace) -> int:
                 "max_len_delta_ratio": args.max_len_delta_ratio,
                 "allow_status_change": bool(args.allow_status_change),
             },
+            "candidate_manifest": candidate_summary,
             "rows": _impact_rows_to_json(rows),
         }
         if _emit_json_if_requested(args, payload):
@@ -1747,6 +2009,7 @@ def cmd_impact(args: argparse.Namespace) -> int:
             "max_len_delta_ratio": args.max_len_delta_ratio,
             "allow_status_change": bool(args.allow_status_change),
         },
+        "candidate_manifest": candidate_summary,
         "rows": _impact_rows_to_json(rows),
     }
     if _emit_json_if_requested(args, payload):
@@ -1791,7 +2054,7 @@ def cmd_profile_security_headers(args: argparse.Namespace) -> int:
     req = _apply_add_common(req, args.add_common)
 
     opts = SendOptions(
-        trust_env=True,
+        trust_env=False,
         timeout_s=args.timeout,
         follow_redirects=args.follow_redirects,
         verify_tls=(not args.insecure),
@@ -1865,7 +2128,7 @@ def cmd_profile_proxy_trust(args: argparse.Namespace) -> int:
     apply_cfg_default(args, "timeout", 15.0, px_def.get("timeout"))
 
     opts = SendOptions(
-        trust_env=True,
+        trust_env=False,
         timeout_s=args.timeout,
         follow_redirects=args.follow_redirects,
         verify_tls=(not args.insecure),
@@ -2016,7 +2279,7 @@ def cmd_profile_host_routing(args: argparse.Namespace) -> int:
     apply_cfg_default(args, "timeout", 15.0, hr_def.get("timeout"))
 
     opts = SendOptions(
-        trust_env=True,
+        trust_env=False,
         timeout_s=args.timeout,
         follow_redirects=args.follow_redirects,
         verify_tls=(not args.insecure),
@@ -2171,6 +2434,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--version", action="version", version=f"mrma {__version__}")
     sub = p.add_subparsers(dest="cmd", required=False)
+
+    authorization = sub.add_parser("authorization", help="Validate authorization manifests")
+    authorization_sub = authorization.add_subparsers(dest="authorization_cmd", required=True)
+    authorization_validate = authorization_sub.add_parser(
+        "validate", help="Validate a strict mrma.authorization/v1 manifest"
+    )
+    authorization_validate.add_argument("path", help="Authorization manifest path")
+    authorization_validate.add_argument("--json", action="store_true", help="Output JSON")
+    authorization_validate.set_defaults(func=cmd_authorization_validate)
+
+    evidence = sub.add_parser("evidence", help="Verify evidence documents and bundles")
+    evidence_sub = evidence.add_subparsers(dest="evidence_cmd", required=True)
+    evidence_verify = evidence_sub.add_parser(
+        "verify", help="Verify a result, journal, or deterministic evidence bundle"
+    )
+    evidence_verify.add_argument("path", help="Evidence JSON, journal, or bundle path")
+    evidence_verify.add_argument("--json", action="store_true", help="Output JSON")
+    evidence_verify.set_defaults(func=cmd_evidence_verify)
+
+    benchmark = sub.add_parser(
+        "benchmark", help="Run the deterministic loopback-only expert benchmark corpus"
+    )
+    benchmark.add_argument("--json", action="store_true", help="Output JSON")
+    benchmark.add_argument("--out-json", help="Write benchmark JSON to a file")
+    benchmark.set_defaults(func=cmd_benchmark)
+
     cfgp = sub.add_parser("config", help="Show config paths and merged config")
     cfgp.add_argument("--json", action="store_true", help="Output JSON")
     cfgp.add_argument("--config", help="Path to a config TOML file")
@@ -2205,6 +2494,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Append common headers (User-Agent/Accept/Connection) unless already present",
     )
+    _add_authorization_args(runp)
     runp.set_defaults(func=cmd_run)
 
     experiment = sub.add_parser(
@@ -2229,6 +2519,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     experiment.add_argument("--data", help="Quick mode: request body")
     experiment.add_argument(
+        "--setup-request",
+        action="append",
+        default=[],
+        help="Authorized semantic request executed once before sampling (repeatable)",
+    )
+    experiment.add_argument(
+        "--reset-request",
+        action="append",
+        default=[],
+        help="Authorized semantic request executed before each round (repeatable)",
+    )
+    experiment.add_argument(
         "--set-header",
         action="append",
         help="Set a mutation header 'Name: value' (repeatable)",
@@ -2237,6 +2539,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--remove-header",
         action="append",
         help="Remove a mutation header by name (repeatable)",
+    )
+    experiment.add_argument(
+        "--candidate-manifest",
+        help="Exploratory candidate manifest to bind into an independent confirmation",
+    )
+    experiment.add_argument(
+        "--candidate-id",
+        help="One predeclared candidate ID from --candidate-manifest",
     )
     experiment.add_argument(
         "--rounds",
@@ -2311,15 +2621,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
     experiment.add_argument(
         "--response-header-scope",
-        choices=["known", "explicit"],
+        choices=["known", "explicit", "all-stable"],
         default="known",
-        help="Use the built-in semantic header registry or only explicitly included fields",
+        help="Use known, explicit, or control-qualified all-stable response fields",
     )
     experiment.add_argument(
         "--include-response-header",
         action="append",
         default=[],
         help="Add an exact response header to decision evidence (repeatable)",
+    )
+    experiment.add_argument(
+        "--include-response-header-pattern",
+        action="append",
+        default=[],
+        help="Select stable response fields with a bounded token glob (repeatable)",
+    )
+    experiment.add_argument(
+        "--exclude-response-header",
+        action="append",
+        default=[],
+        help="Exclude an exact response field from all-stable evidence (repeatable)",
+    )
+    experiment.add_argument(
+        "--response-header-profile",
+        choices=["routing", "security", "cache"],
+        help="Force a documented response-field profile into decision evidence",
+    )
+    experiment.add_argument(
+        "--stable-header-controls",
+        type=int,
+        default=3,
+        help="Budgeted setup controls used by all-stable mode (3-10)",
     )
     experiment.add_argument(
         "--assume-text-without-content-type",
@@ -2360,6 +2693,7 @@ def build_parser() -> argparse.ArgumentParser:
     experiment.add_argument(
         "--assurance",
         choices=["exploratory", "research", "forensic"],
+        default="research",
         help="Apply a coherent experiment policy preset; preset settings are authoritative",
     )
     experiment.add_argument(
@@ -2378,7 +2712,7 @@ def build_parser() -> argparse.ArgumentParser:
     experiment.add_argument(
         "--trust-environment",
         action="store_true",
-        help="Allow HTTPX proxy and CA environment variables and record their use",
+        help="Rejected by v0.4 policy; use explicit proxy and CA inputs",
     )
     experiment.add_argument("--proxy", help="Explicit proxy URL; evidence stores only a keyed fingerprint")
     experiment.add_argument("--ca-bundle", help="Explicit CA bundle; evidence stores only its SHA-256 digest")
@@ -2393,12 +2727,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     experiment.add_argument("--json", action="store_true", help="Emit versioned JSON evidence")
     experiment.add_argument("--out-json", help="Write JSON evidence to a file")
+    experiment.add_argument("--bundle", help="Create a deterministic expert-review ZIP bundle")
+    experiment.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate authorization and the maximum plan without networking",
+    )
     experiment.add_argument(
         "--fail-on",
         choices=["none", "influence", "inconclusive", "any-signal"],
         default="none",
         help="Automation exit policy (influence=10, inconclusive=11)",
     )
+    _add_authorization_args(experiment)
     experiment.set_defaults(func=cmd_experiment)
 
     exp = sub.add_parser("export", help="Export current request as curl or raw HTTP")
@@ -2445,6 +2786,7 @@ def build_parser() -> argparse.ArgumentParser:
     diffp.add_argument("--ignore-body-regex", action="append", default=[], help="Regex to scrub from body before compare (repeatable)")
 
 
+    _add_authorization_args(diffp)
     diffp.set_defaults(func=cmd_diff)
 
     disc = sub.add_parser("discover", help="Find minimal required header set (delta debugging)")
@@ -2489,6 +2831,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     disc.add_argument("--out", help="Write minimal raw request to file")
 
+    _add_authorization_args(disc)
     disc.set_defaults(func=cmd_discover)
 
     iso = sub.add_parser("isolate", help="Find which added headers cause response to change")
@@ -2523,6 +2866,7 @@ def build_parser() -> argparse.ArgumentParser:
     iso.add_argument("--retry-status", default="429,502,503,504", help="Comma list of HTTP statuses to retry")
     iso.add_argument("--delay", type=float, default=0.0, help="Sleep N seconds between requests")
 
+    _add_authorization_args(iso)
     iso.set_defaults(func=cmd_isolate)
     isr = sub.add_parser("isolate-remove", help="Find which header removals cause response to change (ddmin)")
     isr.add_argument("--ignore-header", action="append", default=[], help="Ignore response header (repeatable), e.g. set-cookie")
@@ -2552,6 +2896,7 @@ def build_parser() -> argparse.ArgumentParser:
     isr.add_argument("--retries", type=int, default=0, help="Retry on transient statuses (e.g. 429/503)")
     isr.add_argument("--retry-status", default="429,502,503,504", help="Comma list of HTTP statuses to retry")
 
+    _add_authorization_args(isr)
     isr.set_defaults(func=cmd_isolate_remove)
     
     imp = sub.add_parser(
@@ -2589,7 +2934,12 @@ def build_parser() -> argparse.ArgumentParser:
     imp.add_argument("--rps", type=float, default=0.0, help="Requests per second (rate limit). 0 = off")
     imp.add_argument("--retries", type=int, default=0, help="Retry on transient statuses (e.g. 429/503)")
     imp.add_argument("--retry-status", default="429,502,503,504", help="Comma list of HTTP statuses to retry")
+    imp.add_argument(
+        "--candidate-out",
+        help="Write the exploratory candidate manifest to this new file",
+    )
     
+    _add_authorization_args(imp)
     imp.set_defaults(func=cmd_impact)
     
     # Parent command: profile (subcommands will grow later)
@@ -2619,6 +2969,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Append common headers (User-Agent/Accept/Connection) unless already present",
     )
+    _add_authorization_args(sec)
     sec.set_defaults(func=cmd_profile_security_headers)
     
     px = prof_sub.add_parser(
@@ -2649,6 +3000,7 @@ def build_parser() -> argparse.ArgumentParser:
     px.add_argument("--retries", type=int, default=0, help="Retry on transient statuses (e.g. 429/503)")
     px.add_argument("--retry-status", default="429,502,503,504", help="Comma list of HTTP statuses to retry")
 
+    _add_authorization_args(px)
     px.set_defaults(func=cmd_profile_proxy_trust)
     
     hr = prof_sub.add_parser(
@@ -2680,6 +3032,7 @@ def build_parser() -> argparse.ArgumentParser:
     hr.add_argument("--retries", type=int, default=0, help="Retry on transient statuses (e.g. 429/503)")
     hr.add_argument("--retry-status", default="429,502,503,504", help="Comma list of HTTP statuses to retry")
 
+    _add_authorization_args(hr)
     hr.set_defaults(func=cmd_profile_host_routing)
     
     rep = sub.add_parser("report", help="Run baseline + impact + profiles and write report files")
@@ -2713,6 +3066,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Regex to strip from body before comparison (repeatable).",
     )
+    _add_authorization_args(rep)
     rep.set_defaults(func=cmd_report)
 
     return p
@@ -2732,5 +3086,19 @@ def main() -> None:
     if not getattr(args, "cmd", None):
         raise SystemExit(0)
 
-    rc = args.func(args)
+    try:
+        if getattr(args, "_requires_authorization", False) and args.func is not cmd_experiment:
+            with _legacy_network_scope(args):
+                rc = args.func(args)
+        else:
+            rc = args.func(args)
+    except AuthorizationError as exc:
+        print(f"Authorization rejected: {exc}", file=sys.stderr)
+        rc = EXIT_AUTHORIZATION_REJECTED
+    except BudgetError as exc:
+        print(f"Budget or policy stopped the run: {exc}", file=sys.stderr)
+        rc = EXIT_BUDGET_EXHAUSTED
+    except EvidenceIntegrityError as exc:
+        print(f"Evidence integrity failure: {exc}", file=sys.stderr)
+        rc = EXIT_EVIDENCE_INTEGRITY
     raise SystemExit(rc)

@@ -3,6 +3,7 @@ from mrma.core.compare import (
     equivalent_response,
     resolve_equivalence_policy,
 )
+from mrma.policy.comparison import ComparisonPolicy
 
 
 def test_equivalent_same_body():
@@ -48,7 +49,9 @@ def test_large_text_comparison_is_cpu_bounded():
     body_a = b"a" * (256 * 1024 + 1)
     body_b = b"b" * (256 * 1024 + 1)
     result = equivalent_response(200, body_a, 200, body_b, EquivalenceConfig())
-    assert result.comparator == "bounded-size"
+    assert result.comparator == "bounded-trigram-dice/1.0"
+    assert result.completed is False
+    assert result.resource_limit == "COMPARATOR_INPUT_LIMIT"
     assert result.equivalent is False
 
 
@@ -59,3 +62,10 @@ def test_invalid_body_ignore_regex_is_rejected():
         assert "invalid ignore_body_regex" in str(exc)
     else:
         raise AssertionError("invalid regex was accepted")
+
+
+def test_public_comparison_policy_resolves_and_executes_bounded_comparison():
+    policy = ComparisonPolicy(EquivalenceConfig())
+
+    assert policy.resolved().comparator_version == policy.version
+    assert policy.compare(200, b"same", 200, b"same").equivalent is True

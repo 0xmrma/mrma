@@ -18,6 +18,23 @@ _CASE_INSENSITIVE_FIELD_NAME_SETS = frozenset(
 )
 _CASE_SENSITIVE_METHOD_SETS = frozenset({"allow", "access-control-allow-methods"})
 _URI_REFERENCE_HEADERS = frozenset({"location", "content-location"})
+SEMANTIC_REGISTRY_VERSION = "http-semantics/2.0"
+_SUPPORTED_TEXT_CODECS = frozenset(
+    {"utf-8", "us-ascii", "iso-8859-1", "utf-16", "utf-16le", "utf-16be"}
+)
+_JAVASCRIPT_TYPES = frozenset(
+    {
+        "text/javascript",
+        "application/javascript",
+        "application/ecmascript",
+        "text/ecmascript",
+        "application/x-javascript",
+    }
+)
+_XML_DECLARATION = re.compile(
+    r"^<\?xml[\t\r\n ]+[^?]*?encoding[\t\r\n ]*=[\t\r\n ]*(['\"])([A-Za-z][A-Za-z0-9._-]*)\1",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -30,8 +47,20 @@ class _CacheControlAnalysis:
 class ContentTypeAnalysis:
     media_type: str | None
     parameters: tuple[tuple[str, str], ...] = ()
+    canonical_parameters: tuple[tuple[str, str], ...] = ()
     charset: str | None = None
     ambiguities: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CharsetResolution:
+    declared_media_type: str | None
+    declared_charset: str | None
+    resolved_charset: str | None
+    resolution_source: str
+    eligible: bool
+    reasons: tuple[str, ...] = ()
+    registry_version: str = SEMANTIC_REGISTRY_VERSION
 
 
 def _normalize_percent_encoding(value: str) -> str:
@@ -250,6 +279,7 @@ def _content_type(values: tuple[str, ...]) -> ContentTypeAnalysis:
         return ContentTypeAnalysis(None, ambiguities=("malformed-media-type",))
 
     parsed: list[tuple[str, str]] = []
+    canonical_parameters: list[tuple[str, str]] = []
     ambiguities: list[str] = []
     by_name: dict[str, str] = {}
     charset: str | None = None
@@ -278,33 +308,212 @@ def _content_type(values: tuple[str, ...]) -> ContentTypeAnalysis:
         comparison_value = value
         parsed_charset: str | None = None
         if lowered_name == "charset":
-            try:
-                codec = codecs.lookup(value).name
-            except LookupError:
+            canonical_charset = _canonical_charset(value)
+            if canonical_charset is None:
                 comparison_value = value.lower()
                 ambiguities.append("unsupported-charset")
             else:
-                comparison_value = codec
-                if codec == "utf-8":
-                    parsed_charset = "utf-8"
-                elif codec == "ascii":
-                    parsed_charset = "us-ascii"
-                else:
-                    ambiguities.append("unsupported-charset")
-        if lowered_name in by_name and by_name[lowered_name] != comparison_value:
-            ambiguities.append("conflicting-duplicate-parameter")
+                comparison_value = canonical_charset
+                parsed_charset = canonical_charset
+        if lowered_name in by_name:
+            if by_name[lowered_name] != comparison_value:
+                ambiguities.append("conflicting-duplicate-parameter")
             continue
         by_name[lowered_name] = comparison_value
         if parsed_charset is not None:
             charset = parsed_charset
         parsed.append((lowered_name, value))
+        canonical_parameters.append((lowered_name, comparison_value))
 
     unique_ambiguities = tuple(dict.fromkeys(ambiguities))
     return ContentTypeAnalysis(
         media_type if not unique_ambiguities else None,
         parameters=tuple(parsed),
+        canonical_parameters=tuple(
+            sorted(canonical_parameters, key=lambda item: (item[0], item[1]))
+        ),
         charset=charset,
         ambiguities=unique_ambiguities,
+    )
+
+
+def _canonical_charset(value: str) -> str | None:
+    try:
+        codec = codecs.lookup(value).name
+    except LookupError:
+        return None
+    return {
+        "utf-8": "utf-8",
+        "ascii": "us-ascii",
+        "iso8859-1": "iso-8859-1",
+        "latin-1": "iso-8859-1",
+        "utf-16": "utf-16",
+        "utf-16-le": "utf-16le",
+        "utf-16-be": "utf-16be",
+        "utf-32": "utf-32",
+        "utf-32-le": "utf-32le",
+        "utf-32-be": "utf-32be",
+    }.get(codec, codec)
+
+
+def _xml_encoding_sources(body: bytes) -> tuple[str | None, str | None, tuple[str, ...]]:
+    prefix = body[:1024]
+    reasons: list[str] = []
+    bom: str | None = None
+    decoder = "latin-1"
+    skip = 0
+    if prefix.startswith(b"\x00\x00\xfe\xff") or prefix.startswith(b"\xff\xfe\x00\x00"):
+        return "utf-32", None, ("unsupported-xml-utf32",)
+    if prefix.startswith(b"\xef\xbb\xbf"):
+        bom, decoder, skip = "utf-8", "utf-8", 3
+    elif prefix.startswith(b"\xfe\xff"):
+        bom, decoder, skip = "utf-16be", "utf-16-be", 2
+    elif prefix.startswith(b"\xff\xfe"):
+        bom, decoder, skip = "utf-16le", "utf-16-le", 2
+    elif prefix.startswith(b"\x00\x3c\x00\x3f"):
+        decoder = "utf-16-be"
+    elif prefix.startswith(b"\x3c\x00\x3f\x00"):
+        decoder = "utf-16-le"
+    elif prefix.startswith(b"\x00\x00\x00\x3c") or prefix.startswith(b"\x3c\x00\x00\x00"):
+        return "utf-32", None, ("unsupported-xml-utf32",)
+    try:
+        declaration_text = prefix[skip:].decode(decoder, errors="strict")
+    except UnicodeDecodeError:
+        return bom, None, ("invalid-xml-encoding-prefix",)
+    declaration = _XML_DECLARATION.match(declaration_text)
+    declared: str | None = None
+    if declaration is not None:
+        declared = _canonical_charset(declaration.group(2))
+        if declared is None:
+            reasons.append("unsupported-xml-declaration-encoding")
+    return bom, declared, tuple(reasons)
+
+
+def _javascript_bom(body: bytes) -> str | None:
+    if body.startswith(b"\xef\xbb\xbf"):
+        return "utf-8"
+    if body.startswith(b"\xff\xfe"):
+        return "utf-16le"
+    if body.startswith(b"\xfe\xff"):
+        return "utf-16be"
+    return None
+
+
+def _strict_body_decodes(body: bytes, charset: str) -> bool:
+    decoder = {
+        "us-ascii": "ascii",
+        "iso-8859-1": "iso-8859-1",
+        "utf-16le": "utf-16-le",
+        "utf-16be": "utf-16-be",
+    }.get(charset, charset)
+    try:
+        body.decode(decoder, errors="strict")
+    except (UnicodeDecodeError, LookupError):
+        return False
+    return True
+
+
+def resolve_charset(
+    values: tuple[str, ...],
+    body: bytes,
+    *,
+    assume_text_without_content_type: bool = False,
+) -> CharsetResolution:
+    """Resolve text eligibility under media-type-specific, conservative rules."""
+    if not values:
+        if assume_text_without_content_type:
+            eligible = _strict_body_decodes(body, "utf-8")
+            return CharsetResolution(
+                None,
+                None,
+                "utf-8" if eligible else None,
+                "explicit-user-override",
+                eligible,
+                () if eligible else ("invalid-body-encoding",),
+            )
+        return CharsetResolution(None, None, None, "none", False, ("missing-content-type",))
+
+    analysis = _content_type(values)
+    if analysis.ambiguities:
+        return CharsetResolution(
+            None,
+            analysis.charset,
+            None,
+            "rejected",
+            False,
+            analysis.ambiguities,
+        )
+    media_type = analysis.media_type
+    declared = analysis.charset
+    assert media_type is not None
+    resolved: str | None = None
+    source = "none"
+    reasons: list[str] = []
+
+    is_json = media_type == "application/json" or media_type.endswith("+json")
+    is_xml = media_type in {"application/xml", "text/xml"} or media_type.endswith("+xml")
+    if is_json:
+        if declared is not None and declared != "utf-8":
+            reasons.append("json-non-utf8-charset")
+        else:
+            resolved, source = "utf-8", "json-default" if declared is None else "http-charset"
+    elif is_xml:
+        bom, xml_declaration, xml_reasons = _xml_encoding_sources(body)
+        reasons.extend(xml_reasons)
+        sources = [value for value in (bom, declared, xml_declaration) if value is not None]
+        compatible = {"utf-16", "utf-16le", "utf-16be"}
+        if len(set(sources)) > 1 and not set(sources).issubset(compatible):
+            reasons.append("conflicting-xml-encoding-sources")
+        elif bom is not None:
+            resolved, source = bom, "xml-bom"
+        elif declared is not None:
+            resolved, source = declared, "http-charset"
+        elif xml_declaration is not None:
+            resolved, source = xml_declaration, "xml-declaration"
+        else:
+            resolved, source = "utf-8", "xml-default"
+    elif media_type in _JAVASCRIPT_TYPES:
+        bom = _javascript_bom(body)
+        if bom is not None and declared is not None and bom != declared:
+            reasons.append("conflicting-javascript-encoding-sources")
+        elif bom is not None:
+            resolved, source = bom, "javascript-bom"
+        elif declared is not None:
+            resolved, source = declared, "http-charset"
+        else:
+            resolved, source = "utf-8", "javascript-default"
+    elif media_type == "application/x-www-form-urlencoded":
+        if declared is None:
+            reasons.append("form-charset-not-declared")
+        else:
+            resolved, source = declared, "http-charset"
+    elif media_type.startswith("text/"):
+        if media_type == "text/plain":
+            if declared is None:
+                resolved, source = "us-ascii", "text-plain-default"
+            else:
+                resolved, source = declared, "http-charset"
+        else:
+            reasons.append("unknown-text-subtype")
+    else:
+        reasons.append("unsupported-media-type")
+
+    if resolved is not None and resolved not in _SUPPORTED_TEXT_CODECS:
+        reasons.append("unsupported-resolved-charset")
+    if reasons:
+        resolved = None
+        source = "rejected"
+    elif resolved is not None and not _strict_body_decodes(body, resolved):
+        reasons.append("invalid-body-encoding")
+        resolved = None
+        source = "rejected"
+    return CharsetResolution(
+        media_type,
+        declared,
+        resolved,
+        source,
+        resolved is not None and not reasons,
+        tuple(dict.fromkeys(reasons)),
     )
 
 
@@ -347,6 +556,15 @@ def canonical_header_values(
         return tuple(sorted(tokens))
     if lowered == "cache-control":
         return _cache_control(values).values
+    if lowered == "content-type":
+        analysis = _content_type(values)
+        if analysis.ambiguities or analysis.media_type is None:
+            return (
+                "ambiguous-content-type",
+                *analysis.ambiguities,
+                *(value.strip() for value in values),
+            )
+        return (analysis.media_type, *analysis.canonical_parameters)
     if lowered in _URI_REFERENCE_HEADERS and base_url:
         return tuple(canonical_uri(value, base_url=base_url) for value in values)
     return values

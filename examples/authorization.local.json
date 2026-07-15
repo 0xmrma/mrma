@@ -1,0 +1,59 @@
+{
+  "schema_version": "mrma.authorization/v1",
+  "engagement_id": "local-loopback-example",
+  "issuer": "local-researcher",
+  "subject": "local-researcher",
+  "issued_at": "2026-01-01T00:00:00Z",
+  "expires_at": "2027-01-01T00:00:00Z",
+  "rules": [
+    {
+      "schemes": ["http"],
+      "hosts": ["127.0.0.1"],
+      "ports": [8000],
+      "path_prefixes": ["/"],
+      "methods": ["GET", "POST"],
+      "attempt_kinds": [
+        "control",
+        "mutation",
+        "retry",
+        "redirect",
+        "setup",
+        "reset",
+        "exploratory"
+      ],
+      "cidrs": ["127.0.0.0/8"],
+      "maximum_request_body_bytes": 65536,
+      "maximum_repetitions_by_method": {"POST": 100},
+      "require_idempotency_key": ["POST"],
+      "disposable_environment": true
+    }
+  ],
+  "proxy": {"mode": "deny", "hosts": [], "ports": [], "cidrs": []},
+  "redirects": {
+    "mode": "same-origin",
+    "maximum_depth": 3,
+    "forward_credentials_cross_origin": false
+  },
+  "mutation_families": ["header"],
+  "mutation_risk_classes": ["safe", "non-idempotent"],
+  "budget": {
+    "total_network_attempts": 500,
+    "controls": 200,
+    "mutations": 100,
+    "retries": 0,
+    "redirects": 200,
+    "setup_reset_attempts": 100,
+    "attempts_per_origin": 500,
+    "requests_per_target": 500,
+    "bytes_sent": 10485760,
+    "bytes_received": 104857600,
+    "maximum_response_bytes": 1048576,
+    "maximum_request_body_bytes": 65536,
+    "total_duration_ms": 900000,
+    "per_attempt_timeout_ms": 15000,
+    "concurrency": 1,
+    "redirect_depth": 3,
+    "mutation_risk_level": "non-idempotent"
+  },
+  "organizational_metadata": {"purpose": "loopback documentation example"}
+}

@@ -136,7 +136,6 @@ def test_content_type_parses_quoted_delimiters_escapes_and_supported_charsets():
             "text/plain; charset=utf-8; charset=us-ascii",
             "conflicting-duplicate-parameter",
         ),
-        ("text/plain; charset=iso-8859-1", "unsupported-charset"),
         ("text/plain; charset=not-a-codec", "unsupported-charset"),
     ],
 )
