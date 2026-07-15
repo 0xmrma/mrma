@@ -3,7 +3,11 @@ from __future__ import annotations
 import hashlib
 import os
 import ssl
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
+from types import TracebackType
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -15,6 +19,26 @@ STATE_MODES = ("isolated", "per-arm", "shared-session")
 CONNECTION_MODES = ("reuse", "per-arm", "per-round", "fresh-observation")
 BODY_STORAGE_MODES = ("none", "sample", "full")
 SAMPLE_BODY_BYTES = 64 * 1024
+_GUARDED_TRANSPORT_CAPABILITY = object()
+
+_AuthorizedDispatch = Callable[[RawRequest, str, "SendOptions"], object]
+_AUTHORIZED_DISPATCH: ContextVar[_AuthorizedDispatch | None] = ContextVar(
+    "mrma_authorized_http_dispatch",
+    default=None,
+)
+
+
+class NetworkPolicyError(RuntimeError):
+    mrma_fatal_policy_error = True
+
+
+@contextmanager
+def authorized_http_dispatch(dispatch: _AuthorizedDispatch) -> Iterator[None]:
+    token = _AUTHORIZED_DISPATCH.set(dispatch)
+    try:
+        yield
+    finally:
+        _AUTHORIZED_DISPATCH.reset(token)
 
 
 def ssl_context_from_ca_bytes(ca_bytes: bytes) -> ssl.SSLContext:
@@ -86,7 +110,13 @@ class SemanticHttpTransport:
         opts: SendOptions,
         state_mode: str = "shared-session",
         connection_mode: str = "reuse",
+        *,
+        authorization_kernel: object | None = None,
     ) -> None:
+        if authorization_kernel is not _GUARDED_TRANSPORT_CAPABILITY:
+            raise NetworkPolicyError(
+                "low-level semantic transport requires the authorization kernel capability"
+            )
         if state_mode not in STATE_MODES:
             raise ValueError(f"state_mode must be one of: {', '.join(STATE_MODES)}")
         if connection_mode not in CONNECTION_MODES:
@@ -111,7 +141,12 @@ class SemanticHttpTransport:
         self._state_cookies = {}
         return self
 
-    def __exit__(self, exc_type, exc_value, traceback) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         self.close()
 
     def _new_client(self) -> httpx.Client:
@@ -375,6 +410,10 @@ def _capture_response(
 
 
 def send_raw_request(req: RawRequest, base_url: str, opts: SendOptions) -> httpx.Response:
-    """Send one semantic HTTP request using a short-lived client."""
-    with SemanticHttpTransport(opts) as transport:
-        return transport.send(req, base_url)
+    """Dispatch through the active authorization-first scope."""
+    dispatch = _AUTHORIZED_DISPATCH.get()
+    if dispatch is None:
+        raise NetworkPolicyError(
+            "direct semantic HTTP sends require an authorization-first dispatch scope"
+        )
+    return dispatch(req, base_url, opts)  # type: ignore[return-value]

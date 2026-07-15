@@ -37,7 +37,7 @@ def build_request_from_url(
         hdrs.append(("Host", p.netloc))
 
     return base_url, RawRequest(
-        method=method.upper(),
+        method=method,
         path=path,
         http_version="HTTP/1.1",
         headers=hdrs,

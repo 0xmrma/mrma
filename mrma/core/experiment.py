@@ -18,15 +18,17 @@ import httpx
 from .compare import (
     EffectiveEquivalencePolicy,
     EquivalenceConfig,
+    NormalizationOutcome,
     equivalent_response,
     resolve_equivalence_policy,
 )
 from .http_client import CapturedResponse, RedirectHop
 from .http_semantics import (
+    SEMANTIC_REGISTRY_VERSION,
     canonical_header_values,
     canonical_uri,
-    content_type_analysis,
     header_semantic_ambiguities,
+    resolve_charset,
 )
 from .privacy import EvidenceRedactor
 from .raw_request import RawRequest
@@ -76,7 +78,7 @@ EVIDENCE_RESPONSE_HEADERS = (
     "allow",
 )
 BODY_SAFETY_HEADERS = ("content-type", "content-encoding")
-RESPONSE_HEADER_SCOPES = ("known", "explicit")
+RESPONSE_HEADER_SCOPES = ("known", "explicit", "all-stable")
 _HEADER_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 CONTENT_TYPE_AMBIGUITY_REASONS = frozenset(
     {
@@ -109,6 +111,10 @@ class ExperimentConfig:
     body_storage: str = "sample"
     response_header_scope: str = "known"
     include_response_headers: tuple[str, ...] = ()
+    include_response_header_patterns: tuple[str, ...] = ()
+    exclude_response_headers: tuple[str, ...] = ()
+    response_header_profile: str | None = None
+    stable_header_control_observations: int = 3
     assume_text_without_content_type: bool = False
     trust_environment: bool = False
     tls_verification: str = "system"
@@ -156,6 +162,10 @@ class BodyComparatorEligibility:
     eligible: bool
     charset: str | None
     reasons: tuple[str, ...] = ()
+    declared_media_type: str | None = None
+    declared_charset: str | None = None
+    resolution_source: str = "none"
+    registry_version: str = SEMANTIC_REGISTRY_VERSION
 
 
 @dataclass
@@ -176,6 +186,10 @@ class Observation:
     body_comparator_eligible: bool = False
     body_comparator_charset: str | None = None
     body_comparator_reasons: tuple[str, ...] = ()
+    body_comparator_media_type: str | None = None
+    body_comparator_declared_charset: str | None = None
+    body_comparator_resolution_source: str = "none"
+    semantic_registry_version: str = SEMANTIC_REGISTRY_VERSION
     attempt_trace: tuple[AttemptEvidence, ...] = ()
     error_type: str | None = None
     redirect_chain: tuple[RedirectHop, ...] = ()
@@ -264,6 +278,8 @@ class PairEvidence:
     comparator: str
     attempt_elapsed_delta_ms: float | None = None
     backoff_delta_ms: float | None = None
+    comparator_resource_limit: str | None = None
+    normalization_outcomes: tuple[NormalizationOutcome, ...] = ()
 
     @property
     def changed(self) -> bool:
@@ -607,6 +623,8 @@ def _observe(
         else:
             response = sent
     except Exception as exc:
+        if getattr(exc, "mrma_fatal_policy_error", False):
+            raise
         error = exc
     elapsed_ms = (time.perf_counter() - started) * 1000
 
@@ -678,6 +696,10 @@ def _observe(
         body_comparator_eligible=body_eligibility.eligible,
         body_comparator_charset=body_eligibility.charset,
         body_comparator_reasons=body_eligibility.reasons,
+        body_comparator_media_type=body_eligibility.declared_media_type,
+        body_comparator_declared_charset=body_eligibility.declared_charset,
+        body_comparator_resolution_source=body_eligibility.resolution_source,
+        semantic_registry_version=body_eligibility.registry_version,
         attempt_trace=attempt_trace,
         error_type="ResponseLimitExceeded" if outcome == POLICY_ABORT else None,
         redirect_chain=captured.redirect_chain if captured else (),
@@ -862,45 +884,38 @@ def _body_comparator_eligibility(
     if any(value.strip().lower() not in {"", "identity"} for value in encodings):
         reasons.append("unsupported-content-encoding")
 
-    content_types = headers.get("content-type", ())
-    if not content_types:
-        if assume_text_without_content_type:
-            media_type = "text/plain"
-            charset = "utf-8"
-        else:
-            media_type = None
-            charset = None
-            reasons.append("missing-content-type")
-    else:
-        analysis = content_type_analysis(content_types)
-        reasons.extend(analysis.ambiguities)
-        media_type = analysis.media_type
-        charset = (analysis.charset or "utf-8") if media_type is not None else None
-
-    text_media_type = media_type is not None and (
-        media_type.startswith("text/")
-        or media_type.endswith(("+json", "+xml"))
-        or media_type
-        in {
-            "application/json",
-            "application/xml",
-            "application/javascript",
-            "application/x-javascript",
-            "application/x-www-form-urlencoded",
-        }
+    resolution = resolve_charset(
+        headers.get("content-type", ()),
+        body,
+        assume_text_without_content_type=assume_text_without_content_type,
     )
-    if media_type is not None and not text_media_type:
-        reasons.append("unsupported-media-type")
-
+    reasons.extend(resolution.reasons)
     unique_reasons = tuple(dict.fromkeys(reasons))
-    if unique_reasons or charset is None:
-        return BodyComparatorEligibility(False, None, unique_reasons)
-    decoder = "ascii" if charset == "us-ascii" else charset
-    try:
-        body.decode(decoder, errors="strict")
-    except UnicodeDecodeError:
-        return BodyComparatorEligibility(False, None, ("invalid-body-encoding",))
-    return BodyComparatorEligibility(True, charset)
+    return BodyComparatorEligibility(
+        not unique_reasons and resolution.eligible,
+        resolution.resolved_charset if not unique_reasons else None,
+        unique_reasons,
+        resolution.declared_media_type,
+        resolution.declared_charset,
+        resolution.resolution_source,
+        resolution.registry_version,
+    )
+
+
+def _comparison_body(item: Observation) -> bytes:
+    charset = item.body_comparator_charset
+    if charset is None:
+        raise ValueError("comparison body has no resolved charset")
+    decoder = {
+        "us-ascii": "ascii",
+        "iso-8859-1": "iso-8859-1",
+        "utf-16le": "utf-16-le",
+        "utf-16be": "utf-16-be",
+    }.get(charset, charset)
+    text = item.body.decode(decoder, errors="strict")
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    return text.encode("utf-8")
 
 
 def _compare(
@@ -941,8 +956,34 @@ def _compare(
         )
 
     if a.body_comparator_eligible and b.body_comparator_eligible:
-        comparison = equivalent_response(a.status or 0, a.body, b.status or 0, b.body, policy)
+        comparison = equivalent_response(
+            a.status or 0,
+            _comparison_body(a),
+            b.status or 0,
+            _comparison_body(b),
+            policy,
+        )
         length_delta_ratio = abs(comparison.len_b - comparison.len_a) / max(comparison.len_a, 1)
+        if not comparison.completed:
+            return PairEvidence(
+                round_index=b.round_index,
+                classification=PAIR_CHANGED if decisive_change else PAIR_INDETERMINATE,
+                status_changed=status_changed,
+                body_changed=None,
+                outcome_changed=outcome_changed,
+                redirect_changed=redirect_changed,
+                retry_changed=retry_changed,
+                similarity=None,
+                length_delta_ratio=round(length_delta_ratio, 6),
+                header_diffs=header_diffs,
+                redirect_diffs=redirect_diffs,
+                attempt_diffs=attempt_diffs,
+                comparator=comparison.comparator,
+                attempt_elapsed_delta_ms=attempt_elapsed_delta_ms,
+                backoff_delta_ms=backoff_delta_ms,
+                comparator_resource_limit=comparison.resource_limit,
+                normalization_outcomes=comparison.normalization_outcomes,
+            )
         body_changed = comparison.sim < policy.min_similarity or (
             length_delta_ratio > policy.max_len_delta_ratio
         )
@@ -963,6 +1004,7 @@ def _compare(
             comparator=comparison.comparator,
             attempt_elapsed_delta_ms=attempt_elapsed_delta_ms,
             backoff_delta_ms=backoff_delta_ms,
+            normalization_outcomes=comparison.normalization_outcomes,
         )
 
     exact_digest_match = (
@@ -1316,6 +1358,25 @@ def _limitations(result: ExperimentResult) -> list[dict[str, str]]:
                 "Correct the declared charset or compare the complete response digest only.",
             )
         )
+    comparator_limits = sorted(
+        {
+            pair.comparator_resource_limit
+            for pair in result.pairs
+            if pair.comparator_resource_limit is not None
+        }
+    )
+    if comparator_limits:
+        limitations.append(
+            _limitation(
+                "COMPARATOR_RESOURCE_LIMIT",
+                "high",
+                "semantic_comparison",
+                "At least one required comparison exceeded a bounded resource policy: "
+                + ", ".join(comparator_limits)
+                + ".",
+                "Reduce retained input or replace the normalization rule, then repeat independently.",
+            )
+        )
     if result.config.assume_text_without_content_type:
         limitations.append(
             _limitation(
@@ -1523,14 +1584,25 @@ def _validate_config(cfg: ExperimentConfig) -> tuple[int, int]:
     if cfg.body_storage not in {"none", "sample", "full"}:
         raise ValueError("body_storage must be none, sample, or full")
     if cfg.response_header_scope not in RESPONSE_HEADER_SCOPES:
-        raise ValueError("response_header_scope must be known or explicit")
+        raise ValueError("response_header_scope must be known, explicit, or all-stable")
     invalid_headers = [
         name
-        for name in cfg.include_response_headers
+        for name in (*cfg.include_response_headers, *cfg.exclude_response_headers)
         if _HEADER_NAME.fullmatch(name.strip()) is None
     ]
     if invalid_headers:
         raise ValueError(f"invalid response evidence header name: {invalid_headers[0]!r}")
+    if len(cfg.include_response_header_patterns) > 32 or any(
+        not pattern
+        or len(pattern) > 128
+        or any(character not in "!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ?*" for character in pattern)
+        for pattern in cfg.include_response_header_patterns
+    ):
+        raise ValueError("response header patterns must be bounded token globs")
+    if cfg.response_header_profile not in {None, "routing", "security", "cache"}:
+        raise ValueError("response_header_profile must be routing, security, or cache")
+    if not 3 <= cfg.stable_header_control_observations <= 10:
+        raise ValueError("stable_header_control_observations must be 3-10")
     if cfg.tls_verification not in {"system", "custom-ca", "environment", "disabled"}:
         raise ValueError("tls_verification must be system, custom-ca, environment, or disabled")
     if cfg.proxy_mode not in {"none", "explicit", "environment"}:
@@ -1570,6 +1642,8 @@ def run_experiment(
     sender: Callable[..., object],
     cfg: ExperimentConfig,
     on_progress: Callable[[int, int, str], None] | None = None,
+    on_observation: Callable[[Observation], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> ExperimentResult:
     min_rounds, max_rounds = _validate_config(cfg)
     seed = cfg.seed if cfg.seed is not None else secrets.randbits(64)
@@ -1588,21 +1662,32 @@ def run_experiment(
 
     for round_index, order in enumerate(full_schedule, start=1):
         for arm in order:
+            if should_cancel is not None and should_cancel():
+                cancelled = analyze_experiment(
+                    observations,
+                    cfg,
+                    schedule_seed=public_seed,
+                    schedule=full_schedule[: round_index - 1],
+                    stop_reason="cancelled",
+                )
+                cancelled.verdict = "INCONCLUSIVE"
+                return cancelled
             sequence += 1
             request = mutated_req if arm == "mutation" else baseline_req
-            observations.append(
-                _observe(
-                    arm,
-                    round_index,
-                    sequence,
-                    request,
-                    sender,
-                    policy,
-                    sender_supports_context,
-                    evidence_names,
-                    cfg.assume_text_without_content_type,
-                )
+            observation = _observe(
+                arm,
+                round_index,
+                sequence,
+                request,
+                sender,
+                policy,
+                sender_supports_context,
+                evidence_names,
+                cfg.assume_text_without_content_type,
             )
+            observations.append(observation)
+            if on_observation is not None:
+                on_observation(observation)
             if on_progress is not None:
                 on_progress(sequence, max_rounds * len(order), arm)
 

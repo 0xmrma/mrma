@@ -1,0 +1,686 @@
+from __future__ import annotations
+
+import json
+from collections.abc import Callable
+from copy import deepcopy
+from dataclasses import replace
+from pathlib import Path
+from threading import Event
+from uuid import uuid4
+
+import httpx
+import pytest
+from jsonschema import Draft202012Validator
+
+from mrma.core.compare import EquivalenceConfig
+from mrma.core.experiment import ExperimentConfig
+from mrma.core.http_client import CapturedResponse, SemanticHttpTransport, SendOptions
+from mrma.core.raw_request import RawRequest
+from mrma.core.sender import SendPolicy
+from mrma.engine import ExperimentOracle, ExperimentPlan
+from mrma.engine.oracle import _redirect_request
+from mrma.evidence import EvidenceJournal, validate_result_document
+from mrma.evidence.models import build_experiment_v7
+from mrma.policy.authorization import ManifestAuthorizationPolicy, load_authorization_manifest
+from mrma.policy.budget import BudgetLedger, BudgetLimits
+from mrma.policy.comparison import ComparisonPolicy
+from mrma.transport import SemanticHttpAdapter
+
+
+def build_oracle(
+    payload: dict[str, object],
+    write_authorization: Callable[[dict[str, object]], Path],
+    monkeypatch,
+    handler,
+):
+    manifest = load_authorization_manifest(write_authorization(payload))
+    authorization = ManifestAuthorizationPolicy(
+        manifest,
+        resolver=lambda _host, _port: ("127.0.0.1",),
+    )
+    journal = EvidenceJournal(run_id="oracle-test")
+    ledger = BudgetLedger(BudgetLimits.from_mapping(manifest.budget), journal)
+    adapter = SemanticHttpAdapter(
+        SendOptions(trust_env=False, timeout_s=1),
+        journal=journal,
+        state_mode="isolated",
+        connection_mode="fresh-observation",
+    )
+    monkeypatch.setattr(
+        SemanticHttpTransport,
+        "_new_client",
+        lambda _self: httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    return (
+        ExperimentOracle(
+            authorization=authorization,
+            budgets=ledger,
+            transport=adapter,
+            comparison=ComparisonPolicy(EquivalenceConfig()),
+            evidence=journal,
+        ),
+        journal,
+    )
+
+
+def plan(
+    *,
+    follow_redirects: bool = True,
+    response_header_scope: str = "known",
+) -> ExperimentPlan:
+    baseline = RawRequest(
+        "GET",
+        "/start",
+        "HTTP/1.1",
+        [("Accept", "text/plain")],
+        b"",
+        original_sha256="baseline",
+    )
+    mutation = RawRequest(
+        "GET",
+        "/start",
+        "HTTP/1.1",
+        [("Accept", "text/plain"), ("X-Probe", "1")],
+        b"",
+        original_sha256="mutation",
+    )
+    return ExperimentPlan(
+        baseline=baseline,
+        mutation=mutation,
+        base_url="http://example.test",
+        experiment=ExperimentConfig(
+            rounds=6,
+            schedule_mode="bracketed",
+            connection_mode="fresh-observation",
+            max_response_bytes=1024,
+            body_storage="full",
+            assurance_preset="research",
+            response_header_scope=response_header_scope,
+        ),
+        send=SendPolicy(retries=0),
+        follow_redirects=follow_redirects,
+        mutation_family="header",
+        mutation_risk_class="safe",
+        exploration_role="confirmation",
+    )
+
+
+def v7_document(oracle, journal, experiment_plan, result):
+    journal.close()
+    return build_experiment_v7(
+        result,
+        plan=experiment_plan,
+        authorization=oracle.authorization,
+        budgets=oracle.budgets,
+        journal=journal,
+        run_id=uuid4().hex,
+        started_at="2026-07-15T12:00:00+00:00",
+        completed_at="2026-07-15T12:01:00+00:00",
+        duration_ms=60000,
+        transport_configuration={
+            "trust_environment": False,
+            "tls": {"verification": "system", "ca_fingerprint": None},
+            "proxy": {
+                "mode": "none",
+                "source": "none",
+                "endpoint_fingerprint": None,
+            },
+        },
+    )
+
+
+def test_oracle_manually_authorizes_and_charges_every_redirect(
+    authorization_payload,
+    write_authorization,
+    monkeypatch,
+):
+    requests: list[str] = []
+
+    def handler(incoming: httpx.Request) -> httpx.Response:
+        requests.append(str(incoming.url))
+        if incoming.url.path == "/start":
+            return httpx.Response(302, headers={"Location": "/final"})
+        body = b"mutation" if incoming.headers.get("x-probe") == "1" else b"control"
+        return httpx.Response(200, headers={"Content-Type": "text/plain"}, content=body)
+
+    oracle, journal = build_oracle(
+        authorization_payload,
+        write_authorization,
+        monkeypatch,
+        handler,
+    )
+    result = oracle.run(plan())
+
+    assert result.status == "completed"
+    assert result.completed_rounds == 6
+    assert result.budget.total_network_attempts == len(requests) == 36
+    assert result.budget.controls == 12
+    assert result.budget.mutations == 6
+    assert result.budget.redirects == 18
+    event_types = [event.event_type for event in journal.events]
+    assert event_types.count("AUTHORIZATION_ACCEPTED") == 72
+    assert event_types.count("BUDGET_RESERVED") == 36
+    assert event_types.count("ATTEMPT_STARTED") == 36
+    assert event_types.count("ATTEMPT_COMPLETED") == 36
+    assert event_types.count("REDIRECT_AUTHORIZED") == 18
+    assert event_types[-1] == "RUN_COMPLETED"
+
+
+def test_unauthorized_redirect_stops_before_second_network_attempt(
+    authorization_payload,
+    write_authorization,
+    monkeypatch,
+):
+    payload = deepcopy(authorization_payload)
+    payload["rules"][0]["path_prefixes"] = ["/start"]
+    requests = 0
+
+    def handler(_incoming: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(302, headers={"Location": "/outside"})
+
+    oracle, journal = build_oracle(payload, write_authorization, monkeypatch, handler)
+    result = oracle.run(plan())
+
+    assert result.status == "partial"
+    assert result.verdict == "INCONCLUSIVE"
+    assert result.stop_reason == "target_not_authorized"
+    assert requests == 1
+    assert result.budget.total_network_attempts == 1
+    event_types = [event.event_type for event in journal.events]
+    assert event_types.count("ATTEMPT_STARTED") == 1
+    assert event_types.count("AUTHORIZATION_REJECTED") == 1
+    assert event_types[-1] == "RUN_FAILED"
+
+
+def test_dry_run_authorizes_without_network_or_budget_consumption(
+    authorization_payload,
+    write_authorization,
+    monkeypatch,
+):
+    def forbidden(_incoming: httpx.Request) -> httpx.Response:
+        raise AssertionError("dry-run performed networking")
+
+    oracle, journal = build_oracle(
+        authorization_payload,
+        write_authorization,
+        monkeypatch,
+        forbidden,
+    )
+    summary = oracle.dry_run(plan())
+
+    assert summary.maximum_attempts_with_redirects == 90
+    assert oracle.budgets.snapshot().total_network_attempts == 0
+    assert [event.event_type for event in journal.events].count("ATTEMPT_STARTED") == 0
+
+
+def test_v7_evidence_is_strict_and_schema_valid(
+    authorization_payload,
+    write_authorization,
+    monkeypatch,
+):
+    def handler(incoming: httpx.Request) -> httpx.Response:
+        body = b"mutation" if incoming.headers.get("x-probe") == "1" else b"control"
+        return httpx.Response(200, headers={"Content-Type": "text/plain"}, content=body)
+
+    oracle, journal = build_oracle(
+        authorization_payload,
+        write_authorization,
+        monkeypatch,
+        handler,
+    )
+    experiment_plan = plan(follow_redirects=False)
+    result = oracle.run(experiment_plan)
+    document = v7_document(oracle, journal, experiment_plan, result)
+    schema = json.loads(Path("mrma/schemas/experiment-v7.schema.json").read_text())
+    Draft202012Validator.check_schema(schema)
+    Draft202012Validator(schema).validate(document)
+    assert document["authorization"]["bypass"] is False
+    assert document["transport"]["wire_exact"] is False
+    assert document["journal"]["event_count"] > 0
+
+
+def test_partial_outcomes_are_valid_v7_evidence(
+    authorization_payload,
+    write_authorization,
+    monkeypatch,
+):
+    scenarios = []
+
+    unauthorized = deepcopy(authorization_payload)
+    unauthorized["rules"][0]["path_prefixes"] = ["/allowed"]
+    scenarios.append((unauthorized, None, None))
+
+    exhausted = deepcopy(authorization_payload)
+    exhausted["budget"]["total_network_attempts"] = 1
+    scenarios.append((exhausted, None, None))
+
+    cancelled = Event()
+    cancelled.set()
+    scenarios.append((deepcopy(authorization_payload), cancelled, None))
+    scenarios.append((deepcopy(authorization_payload), None, RuntimeError("offline")))
+
+    statuses = []
+    for payload, cancellation, transport_error in scenarios:
+        oracle, journal = build_oracle(
+            payload,
+            write_authorization,
+            monkeypatch,
+            lambda _request: httpx.Response(200, content=b"ok"),
+        )
+        if transport_error is not None:
+            monkeypatch.setattr(
+                oracle.transport,
+                "send",
+                lambda *_args, error=transport_error, **_kwargs: (_ for _ in ()).throw(error),
+            )
+        experiment_plan = plan(follow_redirects=False)
+        result = oracle.run(experiment_plan, cancellation=cancellation)
+        document = v7_document(oracle, journal, experiment_plan, result)
+
+        statuses.append(result.status)
+        assert result.verdict == "INCONCLUSIVE"
+        assert document["run"]["complete_sampling"] is (
+            result.status == "completed"
+            and result.completed_rounds == result.planned_rounds
+            and len(result.experiment.observations)
+            == result.plan.maximum_logical_observations
+        )
+        assert validate_result_document(document)["schema_valid"] is True
+    assert set(statuses) == {"partial", "cancelled"}
+
+
+def test_all_stable_headers_use_budgeted_controls_and_reject_volatile_fields(
+    authorization_payload,
+    write_authorization,
+    monkeypatch,
+):
+    counter = 0
+
+    def handler(incoming: httpx.Request) -> httpx.Response:
+        nonlocal counter
+        counter += 1
+        body = b"mutation" if incoming.headers.get("x-probe") == "1" else b"control"
+        return httpx.Response(
+            200,
+            headers={
+                "Content-Type": "text/plain",
+                "X-Stable-Unknown": "constant",
+                "X-Volatile-Unknown": str(counter),
+            },
+            content=body,
+        )
+
+    oracle, journal = build_oracle(
+        authorization_payload,
+        write_authorization,
+        monkeypatch,
+        handler,
+    )
+    result = oracle.run(plan(follow_redirects=False, response_header_scope="all-stable"))
+
+    assert result.status == "completed"
+    assert result.budget.setup_reset_attempts == 3
+    assert result.budget.total_network_attempts == 21
+    assert result.header_coverage.complete is True
+    assert "x-stable-unknown" in result.header_coverage.promoted_fields
+    assert "x-volatile-unknown" in result.header_coverage.volatile_fields
+    assert "x-volatile-unknown" not in result.header_coverage.promoted_fields
+    assert [event.event_type for event in journal.events].count("OBSERVATION_COMPLETED") == 21
+
+
+def test_oracle_rejects_a_comparison_policy_mismatch(
+    authorization_payload,
+    write_authorization,
+    monkeypatch,
+):
+    oracle, _journal = build_oracle(
+        authorization_payload,
+        write_authorization,
+        monkeypatch,
+        lambda _request: httpx.Response(200, content=b"ok"),
+    )
+    mismatched = plan(follow_redirects=False)
+    mismatched = replace(
+        mismatched,
+        experiment=replace(
+            mismatched.experiment,
+            equivalence=EquivalenceConfig(min_similarity=0.5),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="comparison policy must match"):
+        oracle.run(mismatched)
+
+
+def test_setup_and_per_round_reset_hooks_are_authorized_budgeted_and_evidenced(
+    authorization_payload,
+    write_authorization,
+    monkeypatch,
+):
+    roles: list[str] = []
+
+    def handler(incoming: httpx.Request) -> httpx.Response:
+        roles.append(incoming.url.path)
+        body = b"mutation" if incoming.headers.get("x-probe") == "1" else b"control"
+        return httpx.Response(200, headers={"Content-Type": "text/plain"}, content=body)
+
+    oracle, journal = build_oracle(
+        authorization_payload,
+        write_authorization,
+        monkeypatch,
+        handler,
+    )
+    experiment_plan = replace(
+        plan(follow_redirects=False),
+        setup_hooks=(
+            RawRequest("GET", "/setup", "HTTP/1.1", [], b"", original_sha256="setup"),
+        ),
+        reset_hooks=(
+            RawRequest("GET", "/reset", "HTTP/1.1", [], b"", original_sha256="reset"),
+        ),
+    )
+    result = oracle.run(experiment_plan)
+
+    assert result.status == "completed"
+    assert result.budget.total_network_attempts == 25
+    assert result.budget.setup_reset_attempts == 7
+    assert roles.count("/setup") == 1
+    assert roles.count("/reset") == 6
+    attempts = [event for event in journal.events if event.event_type == "ATTEMPT_STARTED"]
+    assert sum(event.data["role"] == "setup" for event in attempts) == 1
+    assert sum(event.data["role"] == "reset" for event in attempts) == 6
+
+
+def test_plan_rejects_invalid_roles_assurance_and_semantic_inputs():
+    valid = plan(follow_redirects=False)
+    with pytest.raises(ValueError, match="exploration_role"):
+        replace(valid, exploration_role="invalid")
+    with pytest.raises(ValueError, match="confirmatory plans"):
+        replace(
+            valid,
+            experiment=replace(valid.experiment, assurance_preset="exploratory"),
+        )
+    with pytest.raises(ValueError, match="request input"):
+        replace(
+            valid,
+            baseline=replace(valid.baseline, semantic_replay_eligible=False),
+        )
+    with pytest.raises(ValueError, match="hook request"):
+        replace(
+            valid,
+            setup_hooks=(
+                replace(valid.baseline, semantic_replay_eligible=False),
+            ),
+        )
+
+
+def test_balanced_plan_summary_uses_two_observations_and_no_redirect_multiplier():
+    experiment_plan = plan(follow_redirects=False)
+    experiment_plan = replace(
+        experiment_plan,
+        experiment=replace(experiment_plan.experiment, schedule_mode="balanced"),
+    )
+    summary = experiment_plan.summary(4)
+
+    assert summary.observations_per_round == 2
+    assert summary.maximum_logical_observations == 12
+    assert summary.maximum_attempts_with_redirects == 12
+    assert summary.to_dict()["plan_digest"] == summary.plan_digest
+
+
+def test_oracle_components_must_share_one_journal(
+    authorization_payload,
+    write_authorization,
+    monkeypatch,
+):
+    oracle, _journal = build_oracle(
+        authorization_payload,
+        write_authorization,
+        monkeypatch,
+        lambda _request: httpx.Response(200),
+    )
+    with pytest.raises(ValueError, match="share one evidence journal"):
+        ExperimentOracle(
+            authorization=oracle.authorization,
+            budgets=oracle.budgets,
+            transport=oracle.transport,
+            comparison=ComparisonPolicy(EquivalenceConfig()),
+            evidence=EvidenceJournal(run_id="other"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("budget_change", "plan_change", "message"),
+    [
+        ({"per_attempt_timeout_ms": 500}, {}, "transport timeout"),
+        ({"total_network_attempts": 1}, {}, "planned total_network_attempts"),
+        ({"maximum_response_bytes": 512}, {}, "response bound"),
+        ({"maximum_request_body_bytes": 0}, {"body": b"x"}, "request body"),
+        ({"redirect_depth": 0}, {}, "redirect depth"),
+        (
+            {"mutation_risk_level": "safe"},
+            {"mutation_risk_class": "non-idempotent"},
+            "mutation risk",
+        ),
+    ],
+)
+def test_dry_run_rejects_plans_that_exceed_policy_capacity(
+    authorization_payload,
+    write_authorization,
+    monkeypatch,
+    budget_change,
+    plan_change,
+    message: str,
+):
+    payload = deepcopy(authorization_payload)
+    payload["budget"].update(budget_change)
+    oracle, _journal = build_oracle(
+        payload,
+        write_authorization,
+        monkeypatch,
+        lambda _request: httpx.Response(200),
+    )
+    experiment_plan = plan()
+    if "body" in plan_change:
+        experiment_plan = replace(
+            experiment_plan,
+            baseline=replace(experiment_plan.baseline, body=plan_change["body"]),
+        )
+    if "mutation_risk_class" in plan_change:
+        experiment_plan = replace(
+            experiment_plan,
+            mutation_risk_class=plan_change["mutation_risk_class"],
+        )
+
+    with pytest.raises(Exception, match=message):
+        oracle.dry_run(experiment_plan)
+
+
+def test_dry_run_authorizes_setup_and_reset_hooks(
+    authorization_payload,
+    write_authorization,
+    monkeypatch,
+):
+    oracle, journal = build_oracle(
+        authorization_payload,
+        write_authorization,
+        monkeypatch,
+        lambda _request: httpx.Response(200),
+    )
+    experiment_plan = replace(
+        plan(follow_redirects=False),
+        setup_hooks=(RawRequest("GET", "/setup", "HTTP/1.1", [], b""),),
+        reset_hooks=(RawRequest("GET", "/reset", "HTTP/1.1", [], b""),),
+    )
+    oracle.dry_run(experiment_plan)
+    accepted_roles = [
+        event.data["role"]
+        for event in journal.events
+        if event.event_type == "AUTHORIZATION_ACCEPTED"
+    ]
+    assert accepted_roles == ["control", "mutation", "setup", "reset"]
+
+
+def test_oracle_converts_keyboard_interrupt_and_unexpected_failure_to_partial_results(
+    authorization_payload,
+    write_authorization,
+    monkeypatch,
+):
+    oracle, _journal = build_oracle(
+        authorization_payload,
+        write_authorization,
+        monkeypatch,
+        lambda _request: httpx.Response(200),
+    )
+    monkeypatch.setattr(
+        "mrma.engine.oracle.run_experiment",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+    interrupted = oracle.run(plan(follow_redirects=False))
+    assert interrupted.status == "cancelled"
+    assert interrupted.stop_reason == "keyboard_interrupt"
+
+    oracle, _journal = build_oracle(
+        authorization_payload,
+        write_authorization,
+        monkeypatch,
+        lambda _request: httpx.Response(200),
+    )
+    monkeypatch.setattr(
+        "mrma.engine.oracle.run_experiment",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("fault")),
+    )
+    failed = oracle.run(plan(follow_redirects=False))
+    assert failed.status == "partial"
+    assert failed.stop_reason == "transport_or_policy_failure"
+
+
+def test_all_stable_marks_fields_missing_from_one_control_as_volatile(
+    authorization_payload,
+    write_authorization,
+    monkeypatch,
+):
+    counter = 0
+
+    def handler(incoming: httpx.Request) -> httpx.Response:
+        nonlocal counter
+        counter += 1
+        headers = [("Content-Type", "text/plain")]
+        if counter != 2:
+            headers.append(("X-Optional", "stable"))
+        body = b"mutation" if incoming.headers.get("x-probe") == "1" else b"control"
+        return httpx.Response(200, headers=headers, content=body)
+
+    oracle, _journal = build_oracle(
+        authorization_payload, write_authorization, monkeypatch, handler
+    )
+    result = oracle.run(plan(follow_redirects=False, response_header_scope="all-stable"))
+    assert "x-optional" in result.header_coverage.volatile_fields
+
+
+def test_retry_controller_records_transport_and_status_retries(
+    authorization_payload,
+    write_authorization,
+    monkeypatch,
+):
+    oracle, _journal = build_oracle(
+        authorization_payload,
+        write_authorization,
+        monkeypatch,
+        lambda _request: httpx.Response(200),
+    )
+    response = CapturedResponse(
+        200,
+        (),
+        b"ok",
+        2,
+        "sha256:" + "0" * 64,
+        True,
+        True,
+        False,
+        (),
+        "http://example.test:80",
+        final_url="http://example.test/",
+    )
+    calls = 0
+
+    def transport_then_success(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("transient")
+        return response
+
+    monkeypatch.setattr(oracle, "_attempt", transport_then_success)
+    retry_plan = replace(
+        plan(follow_redirects=False),
+        send=SendPolicy(retries=1, backoff_base_s=0, backoff_cap_s=0),
+    )
+    outcome = oracle._send_with_retries(
+        retry_plan,
+        request=retry_plan.baseline,
+        base_url=retry_plan.base_url,
+        role="control",
+        arm="control",
+        round_index=1,
+        sequence=1,
+        redirect_depth=0,
+    )
+    assert outcome.succeeded
+    assert outcome.attempt_trace[0].retry_reason == "transport-error"
+
+    responses = iter((replace(response, status_code=503), response))
+    monkeypatch.setattr(oracle, "_attempt", lambda *_args, **_kwargs: next(responses))
+    outcome = oracle._send_with_retries(
+        retry_plan,
+        request=retry_plan.baseline,
+        base_url=retry_plan.base_url,
+        role="control",
+        arm="control",
+        round_index=1,
+        sequence=1,
+        redirect_depth=0,
+    )
+    assert outcome.attempt_trace[0].retry_reason == "configured-status"
+
+
+def test_redirect_method_and_credential_policy_transformations():
+    request = RawRequest(
+        "POST",
+        "/submit",
+        "HTTP/1.1",
+        [
+            ("Host", "example.test"),
+            ("Authorization", "secret"),
+            ("Content-Type", "text/plain"),
+            ("Content-Length", "4"),
+            ("X-Test", "1"),
+        ],
+        b"body",
+    )
+    redirected, changed, credentials = _redirect_request(
+        request,
+        "https://other.test/final",
+        303,
+        cross_origin=True,
+        forward_credentials=False,
+    )
+    assert redirected.method == "GET"
+    assert redirected.body == b""
+    assert changed is True
+    assert credentials == "stripped"
+    assert [name.lower() for name, _value in redirected.headers] == ["x-test"]
+
+    retained, changed, credentials = _redirect_request(
+        request,
+        "https://other.test/final",
+        307,
+        cross_origin=True,
+        forward_credentials=True,
+    )
+    assert retained.method == "POST"
+    assert retained.body == b"body"
+    assert changed is False
+    assert credentials == "retained"

@@ -82,13 +82,17 @@ adding more mutation families.
 
 ## 0.4 - Authorization-first experiment engine
 
-- Enforce an authorization policy before any network operation, including every redirect
-- Constrain scheme, host, port, path, method, redirect destination, and policy expiration
-- Centralize total, per-target, redirect, byte, duration, concurrency, and mutation-risk budgets
-- Charge every control, mutation, retry, and redirect against the same budget ledger
-- Extract one stable `ExperimentOracle` and Python API from CLI orchestration
-- Produce schema-valid partial evidence for cancellation, rejection, failure, and exhausted budgets
-- Begin CLI decomposition and migrate the first legacy workflow to the shared oracle
+- [x] Enforce exact target, CIDR, proxy, method, operation-kind, redirect, expiry, and mutation policy
+- [x] Centralize attempt, role, origin/target, byte, response, duration, concurrency, depth, and risk budgets
+- [x] Charge every control, mutation, retry, redirect, setup/reset, and exploratory send
+- [x] Extract typed `ExperimentOracle`, plan, policy, transport, evidence, and candidate APIs
+- [x] Produce v7 partial evidence for cancellation, rejection, exhausted budget, and transport/policy failure
+- [x] Add manual redirects, method-risk repetition controls, and ambient transport rejection
+- [x] Add strict `mrma.authorization/v1`, `mrma.experiment/v7`, and benchmark v1 contracts
+- [x] Add a deterministic 22-case local benchmark and deterministic expert-review bundles
+- [x] Route all legacy sends through the policy kernel and migrate `impact` candidate generation
+- [x] Preserve experiment schemas v2 through v6 byte-for-byte
+- [x] Publish honest whole-repository and critical-runtime branch coverage plus a semantic mutation gate
 
 ## 0.5 - Product-wide evidence oracle
 
@@ -99,6 +103,8 @@ adding more mutation families.
 - Extend schema compatibility tests to every legacy command as it adopts the experiment oracle
 - Complete CLI decomposition into policy, workflow, evidence, and presentation modules
 - Stabilize the public Python SDK
+- Replace exploratory one-pass impact, discovery, isolation, and profiles with repeated oracle designs
+- Decompose the monolithic CLI after compatibility tests cover each workflow boundary
 
 ## Trust Influence Graph
 
@@ -125,6 +131,8 @@ adding more mutation families.
 - OpenTelemetry-compatible audit events
 - Team review states and manual-validation workflow
 - Reproducible container images and signed releases with SBOMs
+
+The 0.7 heading is future operational scope, not a claim about v0.4 readiness.
 
 ## Acceptance bar
 

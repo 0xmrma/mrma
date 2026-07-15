@@ -1,0 +1,20 @@
+{
+  "schema_version": "mrma.semantic-mutation-baseline/v1",
+  "catalog_version": "v0.4-critical-policy/1.0",
+  "expected_mutants": 12,
+  "minimum_killed": 12,
+  "mutant_ids": [
+    "AUTH-EXPIRY-BOUNDARY",
+    "AUTH-ALL-DNS-ANSWERS",
+    "AUTH-PATH-SEGMENT",
+    "AUTH-METHOD-CASE",
+    "AUTH-REPETITION-BOUNDARY",
+    "BUDGET-ATTEMPT-RESERVATION",
+    "BUDGET-REQUEST-BYTES",
+    "BUDGET-WALL-DEADLINE",
+    "VERDICT-INFLUENCE-BRANCH",
+    "VERDICT-NO-INFLUENCE-BRANCH",
+    "VERDICT-INDETERMINATE-GUARD",
+    "PARTIAL-COMPLETE-SAMPLING"
+  ]
+}

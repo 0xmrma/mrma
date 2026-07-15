@@ -9,17 +9,25 @@ MRMA is a research preview. Only the latest patch release receives security fixe
 Use the repository's private GitHub Security Advisory reporting flow. Do not open a public issue
 for a vulnerability that could expose target evidence or credentials.
 
-MRMA 0.3.x does not enforce authorization manifests or centralized request budgets. Operators are
-responsible for obtaining authorization and constraining every run. These controls are explicit
-v0.4 acceptance criteria; documentation must not imply that the current release prevents an
-unauthorized target or excessive request count.
+MRMA v0.4 requires a strict authorization manifest and central budget for every network workflow.
+Authorization or budget bypass, uncharged retries/redirects/hooks, decisive partial results, and
+secret leakage in standard/strict v7 evidence are security defects. The manifest is an unsigned
+local policy object and is not proof of legal authority.
 
 Include the affected version, platform, minimal reproduction, expected security property, and
-whether evidence artifacts may contain sensitive data. Remove real credentials and target data.
+whether evidence artifacts may contain sensitive data. Remove real credentials, executable
+authorization grants, target values, and local paths.
 
 ## Scope
 
 Security reports include secret exposure in default evidence, unexpected cross-observation state,
-unsafe request replay, dependency or release-control compromise, and malformed input that causes
-unbounded CPU, memory, disk, or network use. Scope or budget bypass becomes a reportable control
-failure when the corresponding enforcement feature is released.
+unsafe request replay, dependency or release-control compromise, malformed input that causes
+unbounded CPU, memory, disk, or network use, evidence-chain/bundle verification errors, and
+authorization-to-socket confusion. Wire-level normalization inherent to the documented semantic
+HTTPX adapter is not itself a defect unless MRMA labels it exact or violates a stated invariant.
+
+## Security boundaries
+
+MRMA does not sign authorization manifests, encrypt evidence, bind authorized DNS answers to the
+eventual HTTPX socket, or provide protocol-exact HTTP. Review
+[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) before reporting a limitation as a bypass.

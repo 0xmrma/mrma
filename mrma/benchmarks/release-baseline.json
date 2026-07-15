@@ -1,0 +1,197 @@
+{
+  "schema_version": "mrma.benchmark/v1",
+  "corpus_version": "expert-loopback-corpus/1.0",
+  "mrma_version": "0.4.0",
+  "passed": true,
+  "case_count": 22,
+  "false_positive_count": 0,
+  "false_negative_count": 0,
+  "inconclusive_count": 11,
+  "request_cost": 942,
+  "runtime_ms": 59074.893,
+  "peak_memory_bytes": 4047036,
+  "platform": {
+    "python": "3.12.13",
+    "implementation": "CPython",
+    "operating_system": "Windows",
+    "machine": "AMD64"
+  },
+  "cases": [
+    {
+      "name": "stable-no-influence",
+      "expected_verdict": "NO_INFLUENCE_OBSERVED",
+      "actual_verdict": "NO_INFLUENCE_OBSERVED",
+      "request_cost": 60,
+      "runtime_ms": 2118.157,
+      "passed": true
+    },
+    {
+      "name": "stable-body-influence",
+      "expected_verdict": "INFLUENCE_DETECTED",
+      "actual_verdict": "INFLUENCE_DETECTED",
+      "request_cost": 60,
+      "runtime_ms": 8421.376,
+      "passed": true
+    },
+    {
+      "name": "status-only-influence",
+      "expected_verdict": "INFLUENCE_DETECTED",
+      "actual_verdict": "INFLUENCE_DETECTED",
+      "request_cost": 60,
+      "runtime_ms": 1591.392,
+      "passed": true
+    },
+    {
+      "name": "custom-header-only-influence",
+      "expected_verdict": "INFLUENCE_DETECTED",
+      "actual_verdict": "INFLUENCE_DETECTED",
+      "request_cost": 60,
+      "runtime_ms": 1798.02,
+      "passed": true
+    },
+    {
+      "name": "redirect-only-influence",
+      "expected_verdict": "INFLUENCE_DETECTED",
+      "actual_verdict": "INFLUENCE_DETECTED",
+      "request_cost": 80,
+      "runtime_ms": 2247.635,
+      "passed": true
+    },
+    {
+      "name": "retry-only-influence",
+      "expected_verdict": "INFLUENCE_DETECTED",
+      "actual_verdict": "INFLUENCE_DETECTED",
+      "request_cost": 80,
+      "runtime_ms": 9829.962,
+      "passed": true
+    },
+    {
+      "name": "unstable-controls",
+      "expected_verdict": "INCONCLUSIVE",
+      "actual_verdict": "INCONCLUSIVE",
+      "request_cost": 60,
+      "runtime_ms": 11698.677,
+      "passed": true
+    },
+    {
+      "name": "cookie-contamination",
+      "expected_verdict": "INCONCLUSIVE",
+      "actual_verdict": "INCONCLUSIVE",
+      "request_cost": 60,
+      "runtime_ms": 2346.542,
+      "passed": true
+    },
+    {
+      "name": "missing-content-type",
+      "expected_verdict": "INCONCLUSIVE",
+      "actual_verdict": "INCONCLUSIVE",
+      "request_cost": 60,
+      "runtime_ms": 1238.683,
+      "passed": true
+    },
+    {
+      "name": "malformed-content-type",
+      "expected_verdict": "INCONCLUSIVE",
+      "actual_verdict": "INCONCLUSIVE",
+      "request_cost": 60,
+      "runtime_ms": 1292.325,
+      "passed": true
+    },
+    {
+      "name": "equivalent-content-type-formatting",
+      "expected_verdict": "NO_INFLUENCE_OBSERVED",
+      "actual_verdict": "NO_INFLUENCE_OBSERVED",
+      "request_cost": 60,
+      "runtime_ms": 1335.82,
+      "passed": true
+    },
+    {
+      "name": "xml-encoding",
+      "expected_verdict": "INFLUENCE_DETECTED",
+      "actual_verdict": "INFLUENCE_DETECTED",
+      "request_cost": 60,
+      "runtime_ms": 9912.148,
+      "passed": true
+    },
+    {
+      "name": "binary-response",
+      "expected_verdict": "NO_INFLUENCE_OBSERVED",
+      "actual_verdict": "NO_INFLUENCE_OBSERVED",
+      "request_cost": 60,
+      "runtime_ms": 1394.563,
+      "passed": true
+    },
+    {
+      "name": "truncated-body",
+      "expected_verdict": "INCONCLUSIVE",
+      "actual_verdict": "INCONCLUSIVE",
+      "request_cost": 60,
+      "runtime_ms": 1388.904,
+      "passed": true
+    },
+    {
+      "name": "connection-affinity",
+      "expected_verdict": "LIMITATION_RECORDED",
+      "actual_verdict": "LIMITATION_RECORDED",
+      "request_cost": 60,
+      "runtime_ms": 1664.274,
+      "passed": true
+    },
+    {
+      "name": "unauthorized-initial-target",
+      "expected_verdict": "INCONCLUSIVE",
+      "actual_verdict": "INCONCLUSIVE",
+      "request_cost": 0,
+      "runtime_ms": 82.117,
+      "passed": true
+    },
+    {
+      "name": "unauthorized-redirect",
+      "expected_verdict": "INCONCLUSIVE",
+      "actual_verdict": "INCONCLUSIVE",
+      "request_cost": 1,
+      "runtime_ms": 73.422,
+      "passed": true
+    },
+    {
+      "name": "budget-exhaustion",
+      "expected_verdict": "INCONCLUSIVE",
+      "actual_verdict": "INCONCLUSIVE",
+      "request_cost": 1,
+      "runtime_ms": 85.804,
+      "passed": true
+    },
+    {
+      "name": "cancellation-partial-evidence",
+      "expected_verdict": "INCONCLUSIVE",
+      "actual_verdict": "INCONCLUSIVE",
+      "request_cost": 0,
+      "runtime_ms": 67.809,
+      "passed": true
+    },
+    {
+      "name": "comparator-resource-limit",
+      "expected_verdict": "INCONCLUSIVE",
+      "actual_verdict": "INCONCLUSIVE",
+      "request_cost": 0,
+      "runtime_ms": 0.185,
+      "passed": true
+    },
+    {
+      "name": "normalization-timeout",
+      "expected_verdict": "INCONCLUSIVE",
+      "actual_verdict": "INCONCLUSIVE",
+      "request_cost": 0,
+      "runtime_ms": 2.032,
+      "passed": true
+    },
+    {
+      "name": "binary-raw-request",
+      "expected_verdict": "BINARY_PRESERVED",
+      "actual_verdict": "BINARY_PRESERVED",
+      "request_cost": 0,
+      "runtime_ms": 0.337,
+      "passed": true
+    }
+  ]
+}

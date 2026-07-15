@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 
 
@@ -35,6 +36,21 @@ class SendOutcome:
     @property
     def succeeded(self) -> bool:
         return self.error is None and self.response is not None
+
+
+_ATTEMPT_KIND: ContextVar[str | None] = ContextVar("mrma_attempt_kind", default=None)
+
+
+def current_attempt_kind() -> str | None:
+    return _ATTEMPT_KIND.get()
+
+
+def _send_scoped(send_once: Callable[[], object], kind: str) -> object:
+    token = _ATTEMPT_KIND.set(kind)
+    try:
+        return send_once()
+    finally:
+        _ATTEMPT_KIND.reset(token)
 
 
 class RateGate:
@@ -79,7 +95,7 @@ def send_with_policy(
     attempt = 0
     while True:
         gate.wait(policy)
-        resp = send_once()
+        resp = _send_scoped(send_once, "exploratory" if attempt == 0 else "retry")
 
         code = getattr(resp, "status_code", None)
         if code is None:
@@ -113,7 +129,10 @@ def send_with_policy_outcome(
         response: object | None = None
         attempt_error: Exception | None = None
         try:
-            response = send_once()
+            response = _send_scoped(
+                send_once,
+                "exploratory" if attempt == 1 else "retry",
+            )
         except Exception as exc:
             attempt_error = exc
             elapsed_ms = round((time.perf_counter() - started) * 1000, 3)

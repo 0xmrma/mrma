@@ -1,53 +1,48 @@
-# Release checklist (mrma)
+# MRMA v0.4.0 release checklist
+
+## Correctness and security
+
+- [ ] Every network command is covered by the architectural policy-boundary test.
+- [ ] Authorization, budget, redirect, retry, hook, journal, privacy, and partial-result adversarial tests pass.
+- [ ] `mrma.experiment/v7`, authorization v1, benchmark v1, and all negative fixtures validate.
+- [ ] Experiment schemas v2-v6 match committed immutable SHA-256 fixtures.
+- [ ] The 22-case loopback benchmark passes with zero false positives/negatives.
+- [ ] Critical semantic mutation gate kills all 12 committed mutants.
+- [ ] No unresolved P0/P1 correctness, authorization, evidence, or secret-exposure issue remains.
 
 ## Quality gates
-- [ ] `pytest` passes
-- [ ] branch coverage meets the configured floor
-- [ ] `ruff check mrma tests` passes
-- [ ] `mypy` passes for the experiment, transport, comparison, privacy, and sender core
-- [ ] `python -m compileall mrma` passes
-- [ ] wheel and sdist pass `twine check`
-- [ ] clean virtualenv installs the built wheel and passes `pip check`
-- [ ] `pip-audit` reports no known vulnerable runtime dependency on Python 3.10 and 3.13
-- [ ] CI passes on Python 3.10 and 3.13 across Linux, Windows, and macOS
 
-## Versioning
-- [ ] `python -c "import mrma; print(mrma.__version__)"` matches `pyproject.toml`
-- [ ] `mrma --version` matches `pip show mrma`
+- [ ] Full test suite passes on Linux, Windows, macOS and Python 3.10/3.13.
+- [ ] `ruff check mrma tests tools` passes.
+- [ ] Strict mypy passes for all 19 v0.4 modules; corrected-core mypy passes.
+- [ ] Whole-repository branch coverage is published honestly.
+- [ ] Every gated v0.4 runtime module is at least 90%; combined critical coverage is at least 90%.
+- [ ] Corrected-core branch coverage remains at least 85%.
+- [ ] `python -m compileall -q mrma` passes.
+- [ ] Runtime `pip-audit` passes on Python 3.10 and 3.13.
+- [ ] CodeQL passes.
 
-## CLI sanity (smoke)
-- [ ] `mrma --help` shows commands
-- [ ] `mrma config --json` works
-- [ ] `mrma run --url https://example.com --follow-redirects` works
-- [ ] `mrma experiment` detects a deterministic local mutation
-- [ ] `mrma experiment --json` emits schema-valid `mrma.experiment/v6` without decoration
-- [ ] cookie state does not cross observations in default isolated mode
-- [ ] response limits and transport failures produce typed evidence instead of crashes
-- [ ] redirect and retry traces affect verdicts when final responses are identical
-- [ ] equivalent redirect targets and parsed response headers do not create false signals
-- [ ] method-token case and ambiguous cache-directive order remain decision-bearing
-- [ ] ambiguous cache syntax emits `AMBIGUOUS_CACHE_CONTROL`
-- [ ] retry error subtypes are decision-bearing while timing remains quantitative context
-- [ ] assurance presets, profiles, and structured limitations satisfy v6 cross-field constraints
-- [ ] experiment transport ignores environment proxy/CA settings unless explicitly enabled
-- [ ] transport evidence fingerprints proxy/CA configuration without exposing values or paths
-- [ ] absent or ambiguous `Content-Type` remains digest-only unless explicitly overridden
-- [ ] exact included response headers affect decisions and selected scope is machine-readable
-- [ ] durable evidence mode syncs the file and the parent directory where supported
-- [ ] every connection mode passes its state and pool-isolation tests
-- [ ] exit codes `10` and `11` match the documented `--fail-on` policy
-- [ ] unstable local controls produce `INCONCLUSIVE`
-- [ ] `mrma impact --url https://example.com --follow-redirects --top-deltas 5` works
-- [ ] `mrma report --url https://example.com --follow-redirects --top-deltas 10` writes `mrma_report.json` + `mrma_report.md`
+## Distribution and container
 
-## Docs
-- [ ] README examples tested (copy/paste)
-- [ ] Authorized-use note present
-- [ ] Transport mode and limitations are stated
-- [ ] Result dimensions are not presented as severity or exploitability
-- [ ] release tag is cut only after all quality, CodeQL, and container checks pass on its commit
-- [ ] base image digest and hash-locked container requirements are current and reviewed
-- [ ] release tag is annotated, SSH-signed, and accepted by `.github/release-signers`
-- [ ] protected `release` environment approval gates every publishing job
-- [ ] release assets and OCI provenance pass the documented `gh` verification commands
-- [ ] published OCI index is pinned by digest and contains AMD64, ARM64, and attestation manifests
+- [ ] Version is `0.4.0` in package metadata, import, CLI, wheel, and container.
+- [ ] Wheel and sdist build from a clean tree and pass `twine check`.
+- [ ] Clean wheel install passes `pip check` outside the source tree.
+- [ ] Clean wheel contains experiment v2-v7, authorization v1, benchmark v1, and release baseline.
+- [ ] Non-root container builds from digest-pinned base and hash-locked dependencies.
+- [ ] Container smoke, local authorized experiment, bundle creation, and offline verification pass.
+- [ ] Multi-architecture OCI publication includes provenance and SBOM; final digest is recorded.
+
+## Documentation and governance
+
+- [ ] README, SECURITY, ROADMAP, CHANGELOG, expert guide, and all model docs agree.
+- [ ] Product claim remains a research platform/expert-review candidate, not enterprise-ready.
+- [ ] Semantic HTTP, unsigned authorization, DNS/socket binding, exploratory legacy, and hash-chain trust limitations are explicit.
+- [ ] Protected PR checks and review complete without weakening rules.
+- [ ] Release commit is clean; annotated tag is SSH-signed and accepted by release signer policy.
+- [ ] Protected release environment gates package/container publication.
+- [ ] GitHub release assets, attestations, hashes, OCI index, and digest verify independently.
+
+## Final report
+
+- [ ] Record release commit/tag, test/coverage/mutation results, dependency checks, wheel/sdist hashes,
+  OCI digest, evidence verification, migration status, deferred work, and exact conservative positioning.

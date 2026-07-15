@@ -3,6 +3,54 @@
 All notable changes are documented here. MRMA follows semantic versioning for the CLI and uses an
 independent version in each machine-readable evidence schema.
 
+## 0.4.0 - 2026-07-15
+
+### Authorization-First Runtime
+
+- Added strict `mrma.authorization/v1` manifests with exact target/method/path policy, A/AAAA CIDR
+  checks, immediate DNS revalidation, explicit proxy authorization, manual redirect authorization,
+  expiry, method repetition, idempotency-key, and disposable hook controls.
+- Added a concurrency-safe central ledger. Controls, mutations, retries, redirects, setup/reset,
+  and exploratory sends reserve and commit attempts, role counts, origin/target counts, estimated
+  request bytes, response bytes, duration, concurrency, depth, and risk.
+- Extracted typed engine, policy, semantic transport, evidence, and workflow APIs. Confirmatory
+  experiments use `ExperimentOracle`; all legacy network commands route through its policy kernel.
+- Ambient proxy/CA environment configuration is rejected. HTTPX redirects remain disabled and are
+  processed manually. Semantic replay is explicitly not wire-exact.
+
+### Semantics And Resource Safety
+
+- Added byte-preserving raw request ingestion with strict metadata/framing validation and retained
+  method case, header order/duplicates, target form, HTTP version, and original digest.
+- Added versioned media-specific charset resolution, semantic Content-Type equivalence, bounded XML
+  BOM/declaration handling, conservative unknown-text behavior, and strict decoding.
+- Added timeout-bounded pinned regex normalization, bounded trigram similarity, guarded JSON, and
+  indeterminate comparator-resource outcomes.
+- Added all-stable response-header qualification and explicit exact/pattern/profile field selection.
+
+### Evidence And Research Method
+
+- Added append-only hash-chained normal/durable journals and schema-valid partial results.
+- Added strict `mrma.experiment/v7` with authorization, budget, journal, charset, comparator,
+  transport/runtime, exploration role, assurance, and limitation contracts. Schemas v2-v6 remain
+  byte-locked.
+- Added deterministic evidence bundles with offline verification and a packaged, schema-validated
+  benchmark baseline.
+- Separated exploratory candidate ranking from independent fixed-sample confirmation.
+
+### Verification
+
+- Added a 22-case loopback benchmark: 22/22 passed, 0 false positives, 0 false negatives, 11
+  intentional inconclusives, and 942 authorized attempts in the release baseline.
+- Expanded to 281 tests before final release verification. Honest whole-repository branch coverage
+  is 68%; critical v0.4 runtime coverage is 95.39% with every gated module above 90%; corrected core
+  is 86.89%.
+- Added strict mypy for every v0.4 module, 12/12 killed critical semantic mutants, six-platform test
+  matrix, dual-Python dependency audit, package/schema/baseline checks, CodeQL, and non-root
+  container smoke tests.
+- Declared the JSON Schema validator as a runtime dependency and hash-locked its multi-architecture
+  container dependency closure; clean-wheel CLI startup is a release gate.
+
 ## 0.3.7 - 2026-07-15
 
 ### Media-Type Precision
