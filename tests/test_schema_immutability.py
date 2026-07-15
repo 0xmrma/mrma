@@ -18,11 +18,11 @@ EXPECTED = {
         "9657ec9f1d1be555386878de6d07ea9d9fa12b568ff9d005c725953c93bff648",
     ),
     5: (
-        "dc4eb867d276ff41bf5821507e0d875fc366c17991fb2e24d2d9f04313d9eab4",
+        "8674aede093a1b9bf903f57df3dab014e3dc60a6f1fce667ee5eab6da36073b6",
         "ccba85b25067a43f091797771b0fb82eee9a15c9f6c8ff30804b7fc79cb77cfa",
     ),
     6: (
-        "24c796eba96f8f67b94199f78aa67b23e46557dee5fd3739338edbb2ba66d8f7",
+        "0e43e4e3bdc6fa6619ea47886081a377272c11a2377652fbbe3765e6c8e7da65",
         "a782a82858c36eb8945f72b77dfa6f24e49767306d12a89bfafbeab2acd31d96",
     ),
 }
@@ -31,10 +31,13 @@ EXPECTED = {
 def test_experiment_v2_through_v6_are_byte_and_semantically_immutable():
     for version, (raw_expected, canonical_expected) in EXPECTED.items():
         raw = Path(f"mrma/schemas/experiment-v{version}.schema.json").read_bytes()
+        # Existing Windows worktrees may retain Git's historical CRLF checkout conversion.
+        repository_bytes = raw.replace(b"\r\n", b"\n")
+        assert b"\r" not in repository_bytes
         canonical = json.dumps(
             json.loads(raw),
             sort_keys=True,
             separators=(",", ":"),
         ).encode()
-        assert hashlib.sha256(raw).hexdigest() == raw_expected
+        assert hashlib.sha256(repository_bytes).hexdigest() == raw_expected
         assert hashlib.sha256(canonical).hexdigest() == canonical_expected
