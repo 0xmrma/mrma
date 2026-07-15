@@ -18,13 +18,28 @@ code-owner approval; a sole maintainer cannot provide independent review.
 
 ## Verify a release
 
-Install a current GitHub CLI, authenticate it, and verify the release before installation:
+Install a current GitHub CLI, authenticate it, download both distributions, and verify their
+GitHub-signed build provenance before installation:
 
 ```bash
-gh release verify v0.4.0 -R 0xmrma/mrma
-gh release download v0.4.0 -R 0xmrma/mrma --pattern 'mrma-0.4.0-py3-none-any.whl'
-gh release verify-asset v0.4.0 ./mrma-0.4.0-py3-none-any.whl -R 0xmrma/mrma
+gh release download v0.4.0 -R 0xmrma/mrma \
+  --pattern 'mrma-0.4.0-py3-none-any.whl' \
+  --pattern 'mrma-0.4.0.tar.gz'
+gh attestation verify ./mrma-0.4.0-py3-none-any.whl \
+  -R 0xmrma/mrma \
+  --signer-workflow 0xmrma/mrma/.github/workflows/release.yml \
+  --source-ref refs/tags/v0.4.0
+gh attestation verify ./mrma-0.4.0.tar.gz \
+  -R 0xmrma/mrma \
+  --signer-workflow 0xmrma/mrma/.github/workflows/release.yml \
+  --source-ref refs/tags/v0.4.0
 ```
+
+Release v0.4.0 predates repository release-immutability enablement. Its protected signed tag and
+artifact attestations are independently verifiable, but `gh release verify` and
+`gh release verify-asset` require an immutable-release attestation and do not apply to v0.4.0.
+Repository release immutability is enabled for subsequent releases, which receive that additional
+release-level attestation when published.
 
 Verify the container's GitHub-signed provenance and require the publishing workflow and tag ref:
 
