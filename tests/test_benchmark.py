@@ -5,7 +5,7 @@ from mrma.benchmark import run_benchmark
 from mrma.evidence import validate_benchmark_document
 
 
-def test_loopback_expert_benchmark_corpus_passes_without_false_results():
+def test_loopback_benchmark_corpus_passes_without_false_results():
     result = run_benchmark()
 
     assert result["passed"] is True
@@ -24,6 +24,6 @@ def test_packaged_release_benchmark_is_schema_valid_and_passed():
     verified = validate_benchmark_document(baseline)
 
     assert verified["passed"] is True
-    assert verified["mrma_version"] == "0.4.0"
+    assert verified["mrma_version"] == "0.4.1"
     assert verified["case_count"] == 22
     assert all(item["passed"] for item in baseline["cases"])

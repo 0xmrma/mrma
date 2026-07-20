@@ -8,13 +8,15 @@ integrity, and the distinction between complete and incomplete research. The pri
 1. no network attempt without authorization, lease, and journal context;
 2. no redirect, retry, or hook outside the same policy path;
 3. no decisive result from incomplete fixed sampling;
-4. no configured secrets or local paths in public v7 evidence;
+4. no configured secrets or local paths in public v8 evidence;
 5. no exact-transport claim from semantic replay.
 
 ## Considered threats
 
 - Malicious or mistaken targets, including DNS answers that move outside allowed CIDRs.
 - Redirects into unauthorized hosts, paths, ports, or address ranges.
+- URL/`Host`/SNI/CONNECT authority confusion and duplicate `Host` routing.
+- Cross-origin forwarding of custom credential fields or body-bound signatures.
 - Ambient proxy/CA environment variables that silently alter transport.
 - Repetition of state-changing or extension methods beyond approval.
 - Retry, redirect, hook, response, byte, duration, or concurrency budget bypass.
@@ -29,7 +31,7 @@ integrity, and the distinction between complete and incomplete research. The pri
 
 The local operator, Python process, operating system, resolver, CA store, and installed MRMA artifact
 are trusted. The issuer is responsible for legal and organizational authority. A manifest proves
-only that MRMA accepted a local policy document; v1 does not authenticate its issuer.
+only that MRMA accepted a local policy document; the manifest does not authenticate its issuer.
 
 The target and network may be hostile. MRMA re-resolves immediately before transport, but HTTPX may
 resolve again internally and does not expose a supported address-pinning interface. Therefore an
@@ -44,7 +46,7 @@ moderate limitation.
 - Wire-level request smuggling, HTTP/1 parser differential, or HTTP/2 stream experiments.
 - Proving which intermediary made a black-box decision.
 - Proving exploitability, business impact, or absence of a vulnerability.
-- Distributed coordination, multi-user review, retention, or enterprise operations.
+- Distributed coordination, multi-user validation, retention, or managed operations.
 
 ## Fail-closed behavior
 

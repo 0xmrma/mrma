@@ -108,12 +108,12 @@ def test_cli_emits_schema_valid_evidence_and_stable_influence_exit_code(
     assert process.returncode == 10, process.stderr
     payload = json.loads(process.stdout)
     schema = json.loads(
-        files("mrma.schemas").joinpath("experiment-v7.schema.json").read_text(encoding="utf-8")
+        files("mrma.schemas").joinpath("experiment-v8.schema.json").read_text(encoding="utf-8")
     )
     Draft202012Validator.check_schema(schema)
     validator = Draft202012Validator(schema)
     validator.validate(payload)
-    assert payload["schema_version"] == "mrma.experiment/v7"
+    assert payload["schema_version"] == "mrma.experiment/v8"
     assert payload["run"]["verdict"] == "INFLUENCE_DETECTED"
     assert payload["analysis"]["verdict"] == "INFLUENCE_DETECTED"
     assert len(payload["analysis"]["observations"]) == 60

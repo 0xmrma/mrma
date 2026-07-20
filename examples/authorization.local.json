@@ -1,5 +1,5 @@
 {
-  "schema_version": "mrma.authorization/v1",
+  "schema_version": "mrma.authorization/v2",
   "engagement_id": "local-loopback-example",
   "issuer": "local-researcher",
   "subject": "local-researcher",
@@ -25,17 +25,40 @@
       "maximum_request_body_bytes": 65536,
       "maximum_repetitions_by_method": {"POST": 100},
       "require_idempotency_key": ["POST"],
-      "disposable_environment": true
+      "disposable_environment": true,
+      "query_policy": {
+        "mode": "allow-any",
+        "allowed_keys": [],
+        "required_keys": [],
+        "forbidden_keys": ["token", "access_token", "api_key"],
+        "maximum_query_bytes": 2048
+      }
     }
   ],
   "proxy": {"mode": "deny", "hosts": [], "ports": [], "cidrs": []},
+  "authority": {
+    "mode": "match-target",
+    "allowed_host_fields": [],
+    "allow_host_mutation": false,
+    "allow_duplicate_host": false,
+    "sni_policy": "match-target",
+    "proxy_connect_authority_policy": "match-target"
+  },
   "redirects": {
     "mode": "same-origin",
     "maximum_depth": 3,
-    "forward_credentials_cross_origin": false
+    "cross_origin_headers": {"mode": "safe-default", "allow": []}
   },
   "mutation_families": ["header"],
   "mutation_risk_classes": ["safe", "non-idempotent"],
+  "mutation_policy": {
+    "headers": {
+      "allow_names": ["X-Probe"],
+      "deny_names": ["Authorization", "Cookie", "Proxy-Authorization", "Host"],
+      "operations": ["add", "replace", "remove"],
+      "maximum_value_bytes": 256
+    }
+  },
   "budget": {
     "total_network_attempts": 500,
     "controls": 200,

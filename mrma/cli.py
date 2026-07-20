@@ -54,7 +54,7 @@ from .evidence import (
     create_evidence_bundle,
     verify_evidence,
 )
-from .evidence.models import build_experiment_v7
+from .evidence.models import build_experiment_v8
 from .policy.authorization import (
     AuthorizationError,
     ManifestAuthorizationPolicy,
@@ -362,7 +362,7 @@ def _add_authorization_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--authorization",
         required=True,
-        help="Path to a strict mrma.authorization/v1 manifest",
+        help="Path to a strict mrma.authorization/v1 or v2 manifest",
     )
     parser.add_argument(
         "--journal",
@@ -1179,7 +1179,7 @@ def cmd_experiment(args: argparse.Namespace) -> int:
         finally:
             journal.close()
         dry_payload = {
-            "schema_version": "mrma.plan/v1",
+            "schema_version": "mrma.plan-validation/v1",
             "valid": True,
             "network_attempts": 0,
             "authorization": authorization.manifest.public_summary(),
@@ -1219,7 +1219,7 @@ def cmd_experiment(args: argparse.Namespace) -> int:
     completed_at = utc_now_iso()
     target_metadata = _redacted_target_metadata(base_url, baseline, redactor)
     result_payload = result.to_dict()
-    payload = build_experiment_v7(
+    payload = build_experiment_v8(
         oracle_result,
         plan=plan,
         authorization=authorization,
@@ -1336,7 +1336,7 @@ def cmd_experiment(args: argparse.Namespace) -> int:
         f"[muted]Stop: {result.stop_reason}  |  state: {args.state_mode}  |  "
         f"{schedule_detail}[/muted]"
     )
-    console.print(f"[muted]Run {run_id[:12]}  |  mrma.experiment/v7  |  {duration_ms:.0f} ms[/muted]")
+    console.print(f"[muted]Run {run_id[:12]}  |  mrma.experiment/v8  |  {duration_ms:.0f} ms[/muted]")
     return exit_code
 
 
@@ -2438,7 +2438,7 @@ def build_parser() -> argparse.ArgumentParser:
     authorization = sub.add_parser("authorization", help="Validate authorization manifests")
     authorization_sub = authorization.add_subparsers(dest="authorization_cmd", required=True)
     authorization_validate = authorization_sub.add_parser(
-        "validate", help="Validate a strict mrma.authorization/v1 manifest"
+        "validate", help="Validate a strict mrma.authorization/v1 or v2 manifest"
     )
     authorization_validate.add_argument("path", help="Authorization manifest path")
     authorization_validate.add_argument("--json", action="store_true", help="Output JSON")
@@ -2454,7 +2454,7 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_verify.set_defaults(func=cmd_evidence_verify)
 
     benchmark = sub.add_parser(
-        "benchmark", help="Run the deterministic loopback-only expert benchmark corpus"
+        "benchmark", help="Run the deterministic loopback validation corpus"
     )
     benchmark.add_argument("--json", action="store_true", help="Output JSON")
     benchmark.add_argument("--out-json", help="Write benchmark JSON to a file")
@@ -2727,7 +2727,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     experiment.add_argument("--json", action="store_true", help="Emit versioned JSON evidence")
     experiment.add_argument("--out-json", help="Write JSON evidence to a file")
-    experiment.add_argument("--bundle", help="Create a deterministic expert-review ZIP bundle")
+    experiment.add_argument("--bundle", help="Create a deterministic evidence ZIP bundle")
     experiment.add_argument(
         "--dry-run",
         action="store_true",

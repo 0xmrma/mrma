@@ -1,6 +1,6 @@
 # Research and engineering roadmap
 
-MRMA is a research preview. The sequence below prioritizes correctness and evidence quality before
+MRMA is a research tool. The sequence below prioritizes correctness and evidence quality before
 adding more mutation families.
 
 ## 0.3 - Controlled evidence foundation
@@ -86,12 +86,12 @@ adding more mutation families.
 - [x] Centralize attempt, role, origin/target, byte, response, duration, concurrency, depth, and risk budgets
 - [x] Charge every control, mutation, retry, redirect, setup/reset, and exploratory send
 - [x] Extract typed `ExperimentOracle`, plan, policy, transport, evidence, and candidate APIs
-- [x] Produce v7 partial evidence for cancellation, rejection, exhausted budget, and transport/policy failure
+- [x] Produce v8 partial evidence for cancellation, rejection, exhausted budget, and transport/policy failure
 - [x] Add manual redirects, method-risk repetition controls, and ambient transport rejection
-- [x] Add strict `mrma.authorization/v1`, `mrma.experiment/v7`, and benchmark v1 contracts
-- [x] Add a deterministic 22-case local benchmark and deterministic expert-review bundles
+- [x] Add strict authorization v1-v2, experiment v7-v8, and benchmark v1-v2 contracts
+- [x] Add a deterministic 22-case local benchmark and deterministic evidence bundles
 - [x] Route all legacy sends through the policy kernel and migrate `impact` candidate generation
-- [x] Preserve experiment schemas v2 through v6 byte-for-byte
+- [x] Preserve experiment schemas v2 through v7 byte-for-byte
 - [x] Publish honest whole-repository and critical-runtime branch coverage plus a semantic mutation gate
 
 ## 0.5 - Product-wide evidence oracle
@@ -123,7 +123,7 @@ adding more mutation families.
 - Compare CDN/origin and gateway/backend paths where the operator supplies both authorized routes
 - Add protocol-aware mutation grammars with conservative safety classifications
 
-## 0.7 - Enterprise operation
+## 0.7 - Managed operation
 
 - Signed authorization-policy distribution and organizational trust roots
 - Secret redaction and encrypted evidence storage

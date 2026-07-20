@@ -128,6 +128,7 @@ class SemanticHttpTransport:
         self.connection_mode = connection_mode
         self._clients: dict[str, httpx.Client] = {}
         self._state_cookies: dict[str, httpx.Cookies] = {}
+        self._active_observation: tuple[httpx.Client, bool, str, int | None] | None = None
 
     def __enter__(self) -> SemanticHttpTransport:
         keys: tuple[str, ...]
@@ -139,6 +140,7 @@ class SemanticHttpTransport:
             keys = ()
         self._clients = {key: self._new_client() for key in keys}
         self._state_cookies = {}
+        self._active_observation = None
         return self
 
     def __exit__(
@@ -182,6 +184,8 @@ class SemanticHttpTransport:
             )
 
     def close(self) -> None:
+        if self._active_observation is not None:
+            raise RuntimeError("cannot close transport during an active observation")
         for client in self._clients.values():
             client.close()
         self._clients = {}
@@ -227,6 +231,27 @@ class SemanticHttpTransport:
         else:
             self._state_cookies[self._cookie_state_key(arm)] = httpx.Cookies(client.cookies)
 
+    @contextmanager
+    def observation_session(
+        self,
+        *,
+        arm: str,
+        round_index: int | None,
+    ) -> Iterator[None]:
+        """Keep cookies and a fresh-observation client for one logical observation."""
+        if self._active_observation is not None:
+            raise RuntimeError("observation sessions cannot be nested")
+        client, close_after = self._client_for(arm, round_index)
+        self._before_observation(client, arm)
+        self._active_observation = (client, close_after, arm, round_index)
+        try:
+            yield
+        finally:
+            self._active_observation = None
+            self._after_observation(client, arm)
+            if close_after:
+                client.close()
+
     def send(self, req: RawRequest, base_url: str, arm: str = "control") -> httpx.Response:
         """Send a fully buffered response; retained for legacy non-experiment commands."""
         client, close_after = self._client_for(arm, 0)
@@ -254,8 +279,14 @@ class SemanticHttpTransport:
         if body_storage not in BODY_STORAGE_MODES:
             raise ValueError(f"body_storage must be one of: {', '.join(BODY_STORAGE_MODES)}")
 
-        client, close_after = self._client_for(arm, round_index)
-        self._before_observation(client, arm)
+        active = self._active_observation
+        if active is None:
+            client, close_after = self._client_for(arm, round_index)
+            self._before_observation(client, arm)
+        else:
+            client, close_after, active_arm, active_round = active
+            if arm != active_arm or round_index != active_round:
+                raise RuntimeError("capture does not belong to the active observation")
         request = _build_request(client, req, base_url)
         response: httpx.Response | None = None
         try:
@@ -264,9 +295,10 @@ class SemanticHttpTransport:
         finally:
             if response is not None:
                 response.close()
-            self._after_observation(client, arm)
-            if close_after:
-                client.close()
+            if active is None:
+                self._after_observation(client, arm)
+                if close_after:
+                    client.close()
 
 
 def _merge_url(base_url: str, path: str) -> str:

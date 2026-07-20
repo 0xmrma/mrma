@@ -3,6 +3,36 @@
 All notable changes are documented here. MRMA follows semantic versioning for the CLI and uses an
 independent version in each machine-readable evidence schema.
 
+## 0.4.1 - 2026-07-20
+
+### Policy Boundaries
+
+- Added strict `mrma.authorization/v2` authority policy. URL authority, `Host`, TLS SNI, and proxy
+  CONNECT routing are bound before each attempt; duplicate `Host` fields are rejected and deliberate
+  virtual-host mutations require an exact allowlist.
+- Added per-rule query-key policy and exact header mutation name, operation, and value-size limits.
+- Replaced cross-origin credential-name filtering with deny-by-default header forwarding. Redirects
+  that change to `GET` also remove content, digest, trailer, and message-signature metadata.
+
+### Observation And Evidence Correctness
+
+- Scoped cookie and fresh-connection state to a complete logical observation so redirect and retry
+  hops retain required state without leaking it into the next isolated observation.
+- Added `mrma.plan/v2`, which binds effective requests, duplicate header order, bodies, experiment,
+  comparison, retry, redirect, hook, transport, and authorization policy into one digest.
+- Added strict `mrma.experiment/v8` with the effective plan and an accurate partial-correlation
+  declaration. Experiment schemas v2-v7 and authorization v1 are byte-locked.
+- Added neutral `mrma.benchmark/v2` and `trust-influence-loopback/2.0` identifiers.
+
+### Verification
+
+- Expanded the critical semantic mutation baseline from 12 to 18 invariants, including effective
+  authority, query scope, cross-origin fields, observation state, and plan body identity.
+- Regenerated the 22-case local benchmark under the v2 contract: all expected conclusions passed
+  across 942 authorized attempts.
+- Expanded the suite to 292 tests. The local branch-coverage gate reports 94.77% across critical
+  runtime modules and 86.11% across the corrected core, with every critical module above 90%.
+
 ## 0.4.0 - 2026-07-15
 
 ### Authorization-First Runtime
@@ -162,7 +192,7 @@ independent version in each machine-readable evidence schema.
   as immutable. V4 removes the scalar confidence grade and requires a multidimensional assurance
   profile.
 - Results now include structured limitations with stable code, severity, scope, message, and
-  remediation fields for CI policy and external review.
+  remediation fields for CI policy and independent validation.
 - Added authoritative `exploratory`, `research`, and `forensic` assurance presets. Research mode
   selects fresh connections, isolated response state, disabled retries, a 20-round bracketed
   design, standard privacy, and full body retention within the response bound.

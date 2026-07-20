@@ -1,16 +1,15 @@
-# Expert Review Guide
+# Validation Guide
 
 ## Exact claim
 
-MRMA v0.4.0 is an authorization-enforcing, budgeted, recoverable HTTP trust-influence research
-platform prepared for external expert evaluation. It remains a semantic-HTTP research tool; full
-product-wide oracle migration and protocol-exact HTTP backends are separate future milestones.
+MRMA v0.4.1 is an authorization-enforcing, budgeted, recoverable HTTP trust-influence research
+tool. It uses semantic HTTP replay and fixed-sample differential experiments.
 
 ## Non-claims
 
 MRMA does not prove a vulnerability, exploitability, severity, component attribution, legal
 authorization, transport-byte identity, statistical independence of a remote system, or absence of
-an influence outside the tested policy/design. It is not enterprise-ready.
+an influence outside the tested policy and experiment design.
 
 ## Architecture and threat model
 
@@ -20,7 +19,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) and [THREAT_MODEL.md](THREAT_MODEL.md).
 
 The strongest authorization limitation is DNS/socket binding: all current answers are authorized
 and rechecked immediately before send, but supported HTTPX APIs do not bind that set to the eventual
-socket. Manifests are also unsigned local policy documents.
+socket. Manifests are unsigned local policy documents. Evidence bundles detect modification but do
+not authenticate their creator.
 
 ## Reproduce a result
 
@@ -61,24 +61,23 @@ may vary; conclusions must all pass. See [BENCHMARKS.md](BENCHMARKS.md).
   governance.
 - The local benchmark is finite and cannot cover all HTTP intermediaries or state interactions.
 
-## Requested review questions
+## Validation questions
 
 1. Can any network path bypass authorization, budget reservation, or journal context?
 2. Are host/path/method/CIDR/proxy/redirect semantics fail-closed under DNS and URL edge cases?
 3. Are the fixed-sample verdict rules and control-instability handling defensible?
 4. Can semantic equivalence create meaningful false positives or false negatives for the documented
    media/header registry?
-5. Do v7 and bundle cross-field checks prevent overclaiming on partial/resource-limited runs?
+5. Do v8 and bundle cross-field checks prevent overclaiming on partial/resource-limited runs?
 6. Does standard/strict evidence leak target secrets, credentials, paths, environment values, or
    executable policy data?
 7. Are the stated transport and integrity limitations complete and understandable?
 
 ## Quality evidence
 
-The v0.4 pre-release baseline is 281 passing tests, 68% honest whole-repository branch coverage,
-95.39% combined critical-runtime branch coverage (every listed module above 90%), 86.89% corrected
-core branch coverage, strict mypy success on all 19 v0.4 modules, and 12/12 killed semantic critical
-mutants. Re-run gates on the release commit; these numbers must be updated if code changes.
+Release-specific test, coverage, benchmark, package, and mutation results are recorded in the
+release notes and generated workflow artifacts. Re-run every gate against the commit being
+evaluated rather than relying on an earlier release count.
 
 ## Responsible testing and defects
 

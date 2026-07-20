@@ -25,10 +25,14 @@ EXPECTED = {
         "0e43e4e3bdc6fa6619ea47886081a377272c11a2377652fbbe3765e6c8e7da65",
         "a782a82858c36eb8945f72b77dfa6f24e49767306d12a89bfafbeab2acd31d96",
     ),
+    7: (
+        "0938215c78446a930b412cec079b2262e38d2770d3b82603dab4afd7e30cc683",
+        "29c501bb27f63775c709cf24ff8343cd3dba8ef9f2ebf27c5e639e86212d4169",
+    ),
 }
 
 
-def test_experiment_v2_through_v6_are_byte_and_semantically_immutable():
+def test_experiment_v2_through_v7_are_byte_and_semantically_immutable():
     for version, (raw_expected, canonical_expected) in EXPECTED.items():
         raw = Path(f"mrma/schemas/experiment-v{version}.schema.json").read_bytes()
         # Existing Windows worktrees may retain Git's historical CRLF checkout conversion.
@@ -41,3 +45,20 @@ def test_experiment_v2_through_v6_are_byte_and_semantically_immutable():
         ).encode()
         assert hashlib.sha256(repository_bytes).hexdigest() == raw_expected
         assert hashlib.sha256(canonical).hexdigest() == canonical_expected
+
+
+def test_authorization_v1_is_byte_and_semantically_immutable():
+    raw = Path("mrma/schemas/authorization-v1.schema.json").read_bytes()
+    repository_bytes = raw.replace(b"\r\n", b"\n")
+    canonical = json.dumps(
+        json.loads(raw),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+
+    assert hashlib.sha256(repository_bytes).hexdigest() == (
+        "ed131358e40dd5312087eb16bd1487b9645e77aed2c833d2feadbd26969864ff"
+    )
+    assert hashlib.sha256(canonical).hexdigest() == (
+        "d1fae6b6d22f3ec6d708359f398c3550b07e3d5155f2e62bf889437453c3a8c1"
+    )

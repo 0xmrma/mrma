@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from types import TracebackType
 
@@ -78,6 +80,34 @@ class SemanticHttpAdapter:
     def complete_round(self, round_index: int) -> None:
         self._transport.complete_round(round_index)
 
+    @contextmanager
+    def observation_session(
+        self,
+        *,
+        arm: str,
+        round_index: int | None,
+    ) -> Iterator[None]:
+        if not self._entered:
+            raise TransportPolicyError("TRANSPORT_NOT_ENTERED", "adapter context is not active")
+        normalized_arm = arm if arm in {"control", "mutation"} else "control"
+        with self._transport.observation_session(
+            arm=normalized_arm,
+            round_index=round_index,
+        ):
+            yield
+
+    def public_policy(self) -> dict[str, object]:
+        return {
+            "adapter": TRANSPORT_ADAPTER_VERSION,
+            "timeout_s": self.options.timeout_s,
+            "follow_redirects": False,
+            "trust_environment": self.options.trust_env,
+            "tls_verification": self.options.verify_tls,
+            "proxy_configured": self.options.proxy is not None,
+            "state_mode": self._transport.state_mode,
+            "connection_mode": self._transport.connection_mode,
+        }
+
     def send(
         self,
         request: RawRequest,
@@ -128,6 +158,11 @@ class SemanticHttpAdapter:
                 "round_index": evidence.round_index,
                 "target_fingerprint": authorization.decision.target_fingerprint,
                 "address_set_fingerprint": authorization.decision.address_set_fingerprint,
+                "host_authority_fingerprint": authorization.decision.host_authority_fingerprint,
+                "sni_authority_fingerprint": authorization.decision.sni_authority_fingerprint,
+                "proxy_connect_authority_fingerprint": (
+                    authorization.decision.proxy_connect_authority_fingerprint
+                ),
                 "method": authorization.decision.method,
                 "transport_adapter": TRANSPORT_ADAPTER_VERSION,
                 "redirects_followed_by_adapter": False,

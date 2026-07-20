@@ -58,3 +58,21 @@ limitations.
 declared HTTP/1.0 or HTTP/1.1, line-ending provenance, target form, and original digest. It rejects
 controls, invalid names, folding, malformed lines, and ambiguous Content-Length/Transfer-Encoding.
 Authority and asterisk forms are retained but not eligible for the semantic HTTP adapter.
+
+## Effective authority
+
+Authorization v2 evaluates the URL authority and the effective `Host` field before every network
+attempt. Multiple `Host` fields are rejected. The default policy requires `Host` to match the URL;
+an alternate virtual host must be named by an explicit authority policy that also permits Host
+mutation. HTTPS SNI and proxy CONNECT authority remain bound to the URL target. HTTP/2
+`:authority`, when emitted by the semantic backend, is derived from the already authorized Host
+semantics.
+
+## Redirect state and fields
+
+Redirects are authorized and budgeted one hop at a time. A logical observation owns its cookie jar
+and connection scope across all redirects and retries, then isolated mode resets that state before
+the next observation. On cross-origin redirects, safe-default policy retains only `Accept`,
+`Accept-Language`, and `User-Agent`; every other caller-supplied field requires an explicit
+allowlist entry. Method changes to `GET` or `HEAD` remove body framing, representation metadata,
+digests, and configured signature fields.

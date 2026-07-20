@@ -2,14 +2,16 @@
 
 ## Manifest contract
 
-Research networking requires a strict `mrma.authorization/v1` JSON manifest. Unknown fields,
+Research networking requires a strict authorization JSON manifest. New manifests should use
+`mrma.authorization/v2`; v1 remains readable for compatibility. Unknown fields,
 duplicate keys, non-finite numbers, malformed tokens, wildcards, invalid time windows, and an
 incorrect optional digest are rejected.
 
 The manifest contains engagement, issuer, subject, issue/expiry times, exact schemes/hosts/ports,
 segment-bounded path prefixes, case-sensitive method tokens, operation kinds, CIDRs, body limits,
 method repetition policy, proxy/redirect policy, mutation families/risk classes, and the central
-budget. It must not contain secrets.
+budget. Version 2 additionally defines query-key rules, effective authority rules, exact header
+mutation operations, and cross-origin header forwarding. A manifest must not contain secrets.
 
 HTTP methods are case-sensitive under [RFC 9110 section 9.1](https://www.rfc-editor.org/rfc/rfc9110#section-9.1).
 `GET` and `get` are different tokens. Lowercase standard-looking methods are unknown extensions and
@@ -19,18 +21,21 @@ require explicit authorization and repetition limits.
 
 1. Validate the authorization validity window.
 2. Canonicalize the semantic target and reject URL userinfo.
-3. Match exact scheme, IDNA host, effective port, path segment, method, operation kind, and body
-   bound.
-4. Resolve all A/AAAA answers and require every address to fall inside an allowed CIDR.
-5. Validate explicit proxy name, port, and every proxy address when proxy use is enabled.
-6. Enforce the higher of method risk and declared mutation risk.
-7. Enforce idempotency-key and per-method repetition policy.
-8. Return an `AuthorizedRequestContext` containing only private canonical target data and public
+3. Resolve the effective URL, `Host`, TLS SNI, and proxy CONNECT authorities. Reject duplicate
+   `Host` fields and require every mismatch to be explicitly authorized.
+4. Match exact scheme, IDNA host, effective port, path segment, query policy, method, operation
+   kind, and body bound.
+5. Resolve all A/AAAA answers and require every address to fall inside an allowed CIDR.
+6. Validate explicit proxy name, port, and every proxy address when proxy use is enabled.
+7. Enforce the higher of method risk and declared mutation risk.
+8. Enforce idempotency-key, per-method repetition, and header mutation policy.
+9. Return an `AuthorizedRequestContext` containing only private canonical target data and public
    fingerprints.
-9. Revalidate expiry, target DNS, and proxy DNS immediately before transport.
+10. Revalidate expiry, target DNS, and proxy DNS immediately before transport.
 
-Redirect destinations repeat the sequence. Same-origin and cross-origin behavior is selected by the
-manifest; credentials are stripped cross-origin unless explicit policy permits forwarding.
+Redirect destinations repeat the sequence. Cross-origin hops retain only `Accept`,
+`Accept-Language`, and `User-Agent` by default. Additional fields require an explicit v2 allowlist.
+When redirect semantics change a method to `GET`, body and content/signature metadata are removed.
 
 ## Hooks and state-changing methods
 
@@ -49,4 +54,4 @@ CA digests, not values or paths.
 
 Keep manifests short-lived and generated under an external approval process. Restrict paths,
 methods, operation kinds, CIDRs, and budgets to the exact design. The local example authorizes only
-loopback port 8000. Authorization v1 is not signed and does not establish legal authority.
+loopback port 8000. Authorization manifests are not signed and do not establish legal authority.

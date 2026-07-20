@@ -37,8 +37,28 @@ from .plan import ExperimentPlan, PlanSummary
 
 ORACLE_VERSION = "experiment-oracle/1.0"
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+_SENSITIVE_FIELD_MARKERS = ("token", "secret", "credential", "api-key", "apikey")
 _CREDENTIAL_FIELDS = frozenset({"authorization", "cookie", "proxy-authorization"})
-_CONTENT_FIELDS = frozenset({"content-length", "content-type", "transfer-encoding"})
+_SAFE_CROSS_ORIGIN_FIELDS = frozenset({"accept", "accept-language", "user-agent"})
+_CONTENT_FIELDS = frozenset(
+    {
+        "content-encoding",
+        "content-language",
+        "content-length",
+        "content-location",
+        "content-md5",
+        "content-type",
+        "digest",
+        "content-digest",
+        "repr-digest",
+        "transfer-encoding",
+        "trailer",
+        "last-modified",
+        "signature",
+        "signature-input",
+        "x-amz-content-sha256",
+    }
+)
 _BODY_SAFETY_FIELDS = frozenset({"content-type", "content-encoding"})
 _HEADER_PROFILES = {
     "routing": frozenset(
@@ -122,6 +142,19 @@ class ExperimentOracle:
             raise ValueError(
                 "oracle comparison policy must match the policy bound into the experiment plan"
             )
+        self.authorization.validate_mutation(
+            plan.baseline,
+            plan.mutation,
+            mutation_family=plan.mutation_family,
+        )
+
+    def _plan_summary(self, plan: ExperimentPlan) -> PlanSummary:
+        return plan.summary(
+            self.authorization.manifest.redirects.maximum_depth,
+            authorization_digest=self.authorization.digest,
+            comparison_policy=self.comparison.resolved().to_dict(),
+            transport_policy=self.transport.public_policy(),
+        )
 
     def _validate_plan_budget(
         self,
@@ -216,7 +249,7 @@ class ExperimentOracle:
 
     def dry_run(self, plan: ExperimentPlan) -> PlanSummary:
         self._validate_comparison_policy(plan)
-        summary = plan.summary(self.authorization.manifest.redirects.maximum_depth)
+        summary = self._plan_summary(plan)
         self._validate_plan_budget(plan, summary, require_complete_capacity=True)
         for request, role in ((plan.baseline, "control"), (plan.mutation, "mutation")):
             context = self.authorization.authorize(
@@ -238,6 +271,9 @@ class ExperimentOracle:
                     "target_fingerprint": context.decision.target_fingerprint,
                     "address_set_fingerprint": context.decision.address_set_fingerprint,
                     "proxy_address_set_fingerprint": context.decision.proxy_address_set_fingerprint,
+                    "host_authority_fingerprint": context.decision.host_authority_fingerprint,
+                    "sni_authority_fingerprint": context.decision.sni_authority_fingerprint,
+                    "proxy_connect_authority_fingerprint": context.decision.proxy_connect_authority_fingerprint,
                 },
             )
         for role, requests in (("setup", plan.setup_hooks), ("reset", plan.reset_hooks)):
@@ -260,9 +296,12 @@ class ExperimentOracle:
                         "target_fingerprint": context.decision.target_fingerprint,
                         "address_set_fingerprint": context.decision.address_set_fingerprint,
                         "proxy_address_set_fingerprint": context.decision.proxy_address_set_fingerprint,
+                        "host_authority_fingerprint": context.decision.host_authority_fingerprint,
+                        "sni_authority_fingerprint": context.decision.sni_authority_fingerprint,
+                        "proxy_connect_authority_fingerprint": context.decision.proxy_connect_authority_fingerprint,
                     },
                 )
-        self.evidence.record("RUN_PLANNED", summary.to_dict())
+        self.evidence.record("RUN_PLANNED", summary.to_journal_dict())
         return summary
 
     def send_observation(
@@ -294,9 +333,9 @@ class ExperimentOracle:
         on_progress: Callable[[int, int, str], None] | None = None,
     ) -> OracleRunResult:
         self._validate_comparison_policy(plan)
-        summary = plan.summary(self.authorization.manifest.redirects.maximum_depth)
+        summary = self._plan_summary(plan)
         self._validate_plan_budget(plan, summary, require_complete_capacity=False)
-        self.evidence.record("RUN_PLANNED", summary.to_dict())
+        self.evidence.record("RUN_PLANNED", summary.to_journal_dict())
         active_plan = plan
         header_coverage = HeaderCoverage(
             mode=plan.experiment.response_header_scope,
@@ -636,6 +675,30 @@ class ExperimentOracle:
         sequence: int,
         initial_role: str | None = None,
     ) -> SendOutcome:
+        session_arm = arm if arm in {"control", "mutation"} else "control"
+        with self.transport.observation_session(
+            arm=session_arm,
+            round_index=round_index,
+        ):
+            return self._send_observation_in_session(
+                plan,
+                arm=arm,
+                request=request,
+                round_index=round_index,
+                sequence=sequence,
+                initial_role=initial_role,
+            )
+
+    def _send_observation_in_session(
+        self,
+        plan: ExperimentPlan,
+        *,
+        arm: str,
+        request: RawRequest,
+        round_index: int,
+        sequence: int,
+        initial_role: str | None = None,
+    ) -> SendOutcome:
         role = initial_role or ("mutation" if arm == "mutation" else "control")
         current = request
         current_base = plan.base_url
@@ -686,16 +749,6 @@ class ExperimentOracle:
                 raise error
             source_url = response.final_url or canonical_uri(current_base)
             target_url = canonical_uri(urljoin(source_url, locations[0]))
-            self.evidence.record(
-                "REDIRECT_PROPOSED",
-                {
-                    "round_index": round_index,
-                    "status": response.status_code,
-                    "source_fingerprint": _fingerprint(source_url),
-                    "target_fingerprint": _fingerprint(target_url),
-                    "next_depth": redirect_depth + 1,
-                },
-            )
             redirect_policy = self.authorization.manifest.redirects
             if redirect_policy.mode == "deny":
                 self._reject_redirect("REDIRECT_NOT_AUTHORIZED")
@@ -707,12 +760,40 @@ class ExperimentOracle:
             if redirect_policy.mode == "same-origin" and cross_origin:
                 self._reject_redirect("CROSS_ORIGIN_REDIRECT_NOT_AUTHORIZED")
 
-            next_request, method_changed, credential_forwarding = _redirect_request(
+            (
+                next_request,
+                method_changed,
+                credential_forwarding,
+                retained_headers,
+                stripped_headers,
+            ) = _redirect_request(
                 current,
                 target_url,
                 response.status_code,
                 cross_origin=cross_origin,
-                forward_credentials=redirect_policy.forward_credentials_cross_origin,
+                cross_origin_mode=redirect_policy.cross_origin_headers.mode,
+                cross_origin_allow=redirect_policy.cross_origin_headers.allow,
+            )
+            self.evidence.record(
+                "REDIRECT_PROPOSED",
+                {
+                    "round_index": round_index,
+                    "status": response.status_code,
+                    "source_fingerprint": _fingerprint(source_url),
+                    "target_fingerprint": _fingerprint(target_url),
+                    "next_depth": redirect_depth + 1,
+                    "cross_origin": cross_origin,
+                    "header_policy": redirect_policy.cross_origin_headers.mode,
+                    "retained_header_names": [
+                        plan.experiment.redactor.header_name(name)
+                        for name in retained_headers
+                    ],
+                    "stripped_header_names": [
+                        plan.experiment.redactor.header_name(name)
+                        for name in stripped_headers
+                    ],
+                    "method_changed": method_changed,
+                },
             )
             redirect_chain.append(
                 RedirectHop(
@@ -861,6 +942,9 @@ class ExperimentOracle:
                 "target_fingerprint": context.decision.target_fingerprint,
                 "address_set_fingerprint": context.decision.address_set_fingerprint,
                 "proxy_address_set_fingerprint": context.decision.proxy_address_set_fingerprint,
+                "host_authority_fingerprint": context.decision.host_authority_fingerprint,
+                "sni_authority_fingerprint": context.decision.sni_authority_fingerprint,
+                "proxy_connect_authority_fingerprint": context.decision.proxy_connect_authority_fingerprint,
             },
         )
         if role == "redirect":
@@ -920,6 +1004,9 @@ class ExperimentOracle:
                     "target_fingerprint": context.decision.target_fingerprint,
                     "address_set_fingerprint": context.decision.address_set_fingerprint,
                     "proxy_address_set_fingerprint": context.decision.proxy_address_set_fingerprint,
+                    "host_authority_fingerprint": context.decision.host_authority_fingerprint,
+                    "sni_authority_fingerprint": context.decision.sni_authority_fingerprint,
+                    "proxy_connect_authority_fingerprint": context.decision.proxy_connect_authority_fingerprint,
                     "dns_answer_changed": context.decision.code == "AUTHORIZED_DNS_CHANGED",
                 },
             )
@@ -955,8 +1042,9 @@ def _redirect_request(
     status: int,
     *,
     cross_origin: bool,
-    forward_credentials: bool,
-) -> tuple[RawRequest, bool, str]:
+    cross_origin_mode: str,
+    cross_origin_allow: tuple[str, ...],
+) -> tuple[RawRequest, bool, str, tuple[str, ...], tuple[str, ...]]:
     method = request.method
     next_method = method
     if status == 303 and method != "HEAD":
@@ -967,18 +1055,34 @@ def _redirect_request(
     headers: list[tuple[str, str]] = []
     credentials_present = False
     credentials_retained = False
+    retained_names: list[str] = []
+    stripped_names: list[str] = []
+    allow_all_cross_origin = cross_origin_mode == "explicit" and "*" in cross_origin_allow
+    cross_origin_fields = (
+        set(cross_origin_allow)
+        if cross_origin_mode == "explicit"
+        else set(_SAFE_CROSS_ORIGIN_FIELDS)
+    )
     for name, value in request.headers:
         lowered = name.lower()
         if lowered == "host":
+            stripped_names.append(lowered)
             continue
-        if lowered in _CREDENTIAL_FIELDS:
+        sensitive = lowered in _CREDENTIAL_FIELDS or any(
+            marker in lowered for marker in _SENSITIVE_FIELD_MARKERS
+        )
+        if sensitive:
             credentials_present = True
-            if cross_origin and not forward_credentials:
-                continue
-            credentials_retained = True
         if method_changed and lowered in _CONTENT_FIELDS:
+            stripped_names.append(lowered)
             continue
+        if cross_origin and not allow_all_cross_origin and lowered not in cross_origin_fields:
+            stripped_names.append(lowered)
+            continue
+        if sensitive:
+            credentials_retained = True
         headers.append((name, value))
+        retained_names.append(lowered)
     if not credentials_present:
         credential_forwarding = "none"
     elif credentials_retained:
@@ -997,4 +1101,6 @@ def _redirect_request(
         ),
         method_changed,
         credential_forwarding,
+        tuple(dict.fromkeys(retained_names)),
+        tuple(dict.fromkeys(stripped_names)),
     )

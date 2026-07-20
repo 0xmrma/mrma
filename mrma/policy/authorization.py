@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
 
 from mrma.core.http_semantics import canonical_uri
 from mrma.core.raw_request import RawRequest
@@ -18,8 +18,11 @@ from mrma.core.raw_request import RawRequest
 from .budget import BudgetError, BudgetLimits
 from .method_risk import RISK_RANK, classify_method
 
-AUTHORIZATION_SCHEMA_VERSION = "mrma.authorization/v1"
-AUTHORIZATION_POLICY_VERSION = "authorization-policy/1.0"
+AUTHORIZATION_SCHEMA_VERSION = "mrma.authorization/v2"
+SUPPORTED_AUTHORIZATION_SCHEMAS = frozenset(
+    {"mrma.authorization/v1", AUTHORIZATION_SCHEMA_VERSION}
+)
+AUTHORIZATION_POLICY_VERSION = "authorization-policy/2.0"
 
 Resolver = Callable[[str, int], Sequence[str]]
 _HTTP_METHOD = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
@@ -58,7 +61,11 @@ def _reject_constant(value: str) -> None:
 
 def _canonical_host(value: str) -> str:
     host = value.strip().rstrip(".").lower()
-    if not host or "*" in host:
+    if (
+        not host
+        or any(character in host for character in "*\\%")
+        or any(ord(character) < 0x21 or ord(character) == 0x7F for character in host)
+    ):
         raise AuthorizationError("INVALID_HOST", "authorization hosts must be exact names")
     try:
         return str(ipaddress.ip_address(host))
@@ -118,6 +125,43 @@ def _integers(value: object, field: str) -> tuple[int, ...]:
     return tuple(value)
 
 
+def _header_names(value: object, field: str) -> tuple[str, ...]:
+    names = _strings(value, field, nonempty=False)
+    normalized = tuple(name.lower() for name in names)
+    if any(_HTTP_METHOD.fullmatch(name) is None for name in names):
+        raise AuthorizationError("INVALID_HEADER_NAME", f"{field} contains an invalid field name")
+    if len(normalized) != len(set(normalized)):
+        raise AuthorizationError(
+            "INVALID_HEADER_NAME", f"{field} duplicates a field name case-insensitively"
+        )
+    return normalized
+
+
+def _parse_authority(value: str, *, default_port: int | None) -> tuple[str, int | None]:
+    if (
+        value != value.strip()
+        or value.endswith(":")
+        or any(ord(character) < 0x21 or ord(character) == 0x7F for character in value)
+        or any(character in value for character in "/?#@,\\%")
+    ):
+        raise AuthorizationError("INVALID_HOST_AUTHORITY", "Host authority is malformed")
+    try:
+        parsed = urlsplit("//" + value)
+        host = _canonical_host(parsed.hostname or "")
+        port = parsed.port
+    except ValueError as exc:
+        raise AuthorizationError("INVALID_HOST_AUTHORITY", "Host authority is malformed") from exc
+    if parsed.path or parsed.query or parsed.fragment or parsed.username is not None:
+        raise AuthorizationError("INVALID_HOST_AUTHORITY", "Host authority is malformed")
+    return host, port if port is not None else default_port
+
+
+def _authority_text(host: str, port: int, scheme: str) -> str:
+    display_host = f"[{host}]" if ":" in host else host
+    default_port = 443 if scheme == "https" else 80
+    return display_host if port == default_port else f"{display_host}:{port}"
+
+
 @dataclass(frozen=True)
 class TargetRule:
     schemes: tuple[str, ...]
@@ -131,6 +175,7 @@ class TargetRule:
     maximum_repetitions_by_method: tuple[tuple[str, int], ...]
     require_idempotency_key: tuple[str, ...]
     disposable_environment: bool
+    query_policy: QueryPolicy
 
     def repetition_limit(self, method: str) -> int | None:
         return dict(self.maximum_repetitions_by_method).get(method)
@@ -145,10 +190,43 @@ class ProxyPolicy:
 
 
 @dataclass(frozen=True)
+class QueryPolicy:
+    mode: str
+    allowed_keys: tuple[str, ...] = ()
+    required_keys: tuple[str, ...] = ()
+    forbidden_keys: tuple[str, ...] = ()
+    maximum_query_bytes: int = 4096
+
+
+@dataclass(frozen=True)
+class AuthorityPolicy:
+    mode: str
+    allowed_host_fields: tuple[str, ...]
+    allow_host_mutation: bool
+    allow_duplicate_host: bool
+    sni_policy: str
+    proxy_connect_authority_policy: str
+
+
+@dataclass(frozen=True)
+class CrossOriginHeaderPolicy:
+    mode: str
+    allow: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class RedirectPolicy:
     mode: str
     maximum_depth: int
-    forward_credentials_cross_origin: bool
+    cross_origin_headers: CrossOriginHeaderPolicy
+
+
+@dataclass(frozen=True)
+class HeaderMutationPolicy:
+    allow_names: tuple[str, ...]
+    deny_names: tuple[str, ...]
+    operations: tuple[str, ...]
+    maximum_value_bytes: int
 
 
 @dataclass(frozen=True)
@@ -161,23 +239,36 @@ class AuthorizationManifest:
     expires_at: datetime
     rules: tuple[TargetRule, ...]
     proxy: ProxyPolicy
+    authority: AuthorityPolicy
     redirects: RedirectPolicy
     mutation_families: tuple[str, ...]
     mutation_risk_classes: tuple[str, ...]
+    header_mutations: HeaderMutationPolicy | None
     organizational_metadata: tuple[tuple[str, str], ...]
     budget: Mapping[str, object]
     digest: str
 
-    def public_summary(self) -> dict[str, object]:
+    def public_summary(self, redactor: object | None = None) -> dict[str, object]:
+        def fingerprint(value: str, label: str) -> str:
+            method = getattr(redactor, "fingerprint", None)
+            if callable(method):
+                return str(method(value, label=label))
+            return f"sha256:{hashlib.sha256(value.encode()).hexdigest()}"
+
         return {
             "schema_version": self.schema_version,
-            "engagement_fingerprint": f"sha256:{hashlib.sha256(self.engagement_id.encode()).hexdigest()}",
-            "issuer_fingerprint": f"sha256:{hashlib.sha256(self.issuer.encode()).hexdigest()}",
-            "subject_fingerprint": f"sha256:{hashlib.sha256(self.subject.encode()).hexdigest()}",
+            "engagement_fingerprint": fingerprint(self.engagement_id, "authorization-engagement"),
+            "issuer_fingerprint": fingerprint(self.issuer, "authorization-issuer"),
+            "subject_fingerprint": fingerprint(self.subject, "authorization-subject"),
             "expires_at": self.expires_at.replace(microsecond=0).isoformat(),
             "rule_count": len(self.rules),
             "digest": self.digest,
             "policy_version": AUTHORIZATION_POLICY_VERSION,
+            "authority_mode": self.authority.mode,
+            "host_mutation_authorized": self.authority.allow_host_mutation,
+            "cross_origin_header_mode": self.redirects.cross_origin_headers.mode,
+            "query_policy_version": "query-policy/1.0",
+            "mutation_policy_version": "header-mutation-policy/1.0",
         }
 
 
@@ -190,6 +281,9 @@ class AuthorizationDecision:
     target_fingerprint: str
     address_set_fingerprint: str
     proxy_address_set_fingerprint: str | None
+    host_authority_fingerprint: str
+    sni_authority_fingerprint: str | None
+    proxy_connect_authority_fingerprint: str | None
     canonical_origin: str = field(repr=False)
     method: str
     attempt_kind: str
@@ -204,13 +298,61 @@ class AuthorizedRequestContext:
     rule_index: int
     request_fingerprint: str
     proxy_url: str | None = field(default=None, repr=False)
+    effective_host_authority: str = field(default="", repr=False)
 
     def __post_init__(self) -> None:
         if not self.decision.accepted:
             raise ValueError("an authorized request context requires an accepted decision")
 
 
-def _parse_rule(value: object, index: int) -> TargetRule:
+def _parse_query_policy(value: object, *, required: bool, field: str) -> QueryPolicy:
+    if value is None and not required:
+        return QueryPolicy(mode="allow-any")
+    if not isinstance(value, dict):
+        raise AuthorizationError("INVALID_QUERY_POLICY", f"{field} must be an object")
+    keys = {
+        "mode",
+        "allowed_keys",
+        "required_keys",
+        "forbidden_keys",
+        "maximum_query_bytes",
+    }
+    _expect_keys(value, allowed=keys, required=keys, name=field)
+    mode = value["mode"]
+    if mode not in {"deny", "allow-any", "explicit"}:
+        raise AuthorizationError("INVALID_QUERY_POLICY", f"{field}.mode is invalid")
+    allowed = _strings(value["allowed_keys"], f"{field}.allowed_keys", nonempty=False)
+    required_keys = _strings(value["required_keys"], f"{field}.required_keys", nonempty=False)
+    forbidden = _strings(value["forbidden_keys"], f"{field}.forbidden_keys", nonempty=False)
+    maximum_bytes = value["maximum_query_bytes"]
+    if (
+        not isinstance(maximum_bytes, int)
+        or isinstance(maximum_bytes, bool)
+        or not 0 <= maximum_bytes <= 65536
+    ):
+        raise AuthorizationError(
+            "INVALID_QUERY_POLICY", f"{field}.maximum_query_bytes must be in 0..65536"
+        )
+    if set(forbidden) & (set(allowed) | set(required_keys)):
+        raise AuthorizationError(
+            "INVALID_QUERY_POLICY", f"{field}.forbidden_keys conflicts with allowed keys"
+        )
+    if mode != "explicit" and (allowed or required_keys):
+        raise AuthorizationError(
+            "INVALID_QUERY_POLICY", f"{field} only permits allowed/required keys in explicit mode"
+        )
+    if mode == "deny" and forbidden:
+        raise AuthorizationError(
+            "INVALID_QUERY_POLICY", f"{field} deny mode does not accept key lists"
+        )
+    if mode == "explicit" and any(key not in allowed for key in required_keys):
+        raise AuthorizationError(
+            "INVALID_QUERY_POLICY", f"{field}.required_keys must also be allowed"
+        )
+    return QueryPolicy(mode, allowed, required_keys, forbidden, maximum_bytes)
+
+
+def _parse_rule(value: object, index: int, schema_version: str) -> TargetRule:
     if not isinstance(value, dict):
         raise AuthorizationError("INVALID_MANIFEST_FIELD", f"rules[{index}] must be an object")
     allowed = {
@@ -226,7 +368,10 @@ def _parse_rule(value: object, index: int) -> TargetRule:
         "require_idempotency_key",
         "disposable_environment",
     }
-    required = allowed - {"maximum_repetitions_by_method", "require_idempotency_key", "disposable_environment"}
+    optional = {"maximum_repetitions_by_method", "require_idempotency_key", "disposable_environment"}
+    if schema_version == AUTHORIZATION_SCHEMA_VERSION:
+        allowed.add("query_policy")
+    required = allowed - optional
     _expect_keys(value, allowed=allowed, required=required, name=f"rules[{index}]")
     schemes = tuple(item.lower() for item in _strings(value["schemes"], "schemes"))
     if any(item not in {"http", "https"} for item in schemes):
@@ -320,6 +465,11 @@ def _parse_rule(value: object, index: int) -> TargetRule:
         ),
         require_idempotency_key=idempotency,
         disposable_environment=disposable,
+        query_policy=_parse_query_policy(
+            value.get("query_policy"),
+            required=schema_version == AUTHORIZATION_SCHEMA_VERSION,
+            field=f"rules[{index}].query_policy",
+        ),
     )
 
 
@@ -337,6 +487,12 @@ def load_authorization_manifest(path: str | Path) -> AuthorizationManifest:
         raise AuthorizationError("INVALID_MANIFEST_JSON", str(exc)) from exc
     if not isinstance(payload, dict):
         raise AuthorizationError("INVALID_MANIFEST", "manifest root must be an object")
+    schema_version = payload.get("schema_version")
+    if schema_version not in SUPPORTED_AUTHORIZATION_SCHEMAS:
+        raise AuthorizationError(
+            "UNSUPPORTED_AUTHORIZATION_SCHEMA",
+            "expected mrma.authorization/v1 or mrma.authorization/v2",
+        )
     allowed = {
         "schema_version",
         "engagement_id",
@@ -353,10 +509,11 @@ def load_authorization_manifest(path: str | Path) -> AuthorizationManifest:
         "authorization_digest",
         "organizational_metadata",
     }
-    required = allowed - {"authorization_digest", "organizational_metadata"}
+    optional = {"authorization_digest", "organizational_metadata"}
+    if schema_version == AUTHORIZATION_SCHEMA_VERSION:
+        allowed.update({"authority", "mutation_policy"})
+    required = allowed - optional
     _expect_keys(payload, allowed=allowed, required=required, name="manifest")
-    if payload["schema_version"] != AUTHORIZATION_SCHEMA_VERSION:
-        raise AuthorizationError("UNSUPPORTED_AUTHORIZATION_SCHEMA", "expected mrma.authorization/v1")
     for field_name in ("engagement_id", "issuer", "subject", "issued_at", "expires_at"):
         if not isinstance(payload[field_name], str) or not payload[field_name]:
             raise AuthorizationError(
@@ -369,7 +526,9 @@ def load_authorization_manifest(path: str | Path) -> AuthorizationManifest:
     raw_rules = payload["rules"]
     if not isinstance(raw_rules, list) or not raw_rules:
         raise AuthorizationError("INVALID_MANIFEST_FIELD", "rules must be a non-empty array")
-    rules = tuple(_parse_rule(item, index) for index, item in enumerate(raw_rules))
+    rules = tuple(
+        _parse_rule(item, index, str(schema_version)) for index, item in enumerate(raw_rules)
+    )
 
     proxy_value = payload["proxy"]
     if not isinstance(proxy_value, dict):
@@ -406,26 +565,176 @@ def load_authorization_manifest(path: str | Path) -> AuthorizationManifest:
             "explicit proxy policy requires exact hosts and ports",
         )
 
+    authority_value = payload.get("authority")
+    if schema_version == "mrma.authorization/v1":
+        authority = AuthorityPolicy(
+            mode="match-target",
+            allowed_host_fields=(),
+            allow_host_mutation=False,
+            allow_duplicate_host=False,
+            sni_policy="match-target",
+            proxy_connect_authority_policy="match-target",
+        )
+    else:
+        if not isinstance(authority_value, dict):
+            raise AuthorizationError("INVALID_AUTHORITY_POLICY", "authority must be an object")
+        authority_keys = {
+            "mode",
+            "allowed_host_fields",
+            "allow_host_mutation",
+            "allow_duplicate_host",
+            "sni_policy",
+            "proxy_connect_authority_policy",
+        }
+        _expect_keys(
+            authority_value,
+            allowed=authority_keys,
+            required=authority_keys,
+            name="authority",
+        )
+        if authority_value["mode"] not in {"match-target", "explicit"}:
+            raise AuthorizationError("INVALID_AUTHORITY_POLICY", "unknown authority mode")
+        allowed_authorities = _strings(
+            authority_value["allowed_host_fields"],
+            "authority.allowed_host_fields",
+            nonempty=authority_value["mode"] == "explicit",
+        )
+        canonical_authorities = {
+            _parse_authority(item, default_port=None) for item in allowed_authorities
+        }
+        if len(canonical_authorities) != len(allowed_authorities):
+            raise AuthorizationError(
+                "INVALID_AUTHORITY_POLICY",
+                "allowed_host_fields contains canonically duplicate authorities",
+            )
+        if authority_value["allow_duplicate_host"] is not False:
+            raise AuthorizationError(
+                "INVALID_AUTHORITY_POLICY", "duplicate Host fields cannot be authorized"
+            )
+        for field_name in ("allow_host_mutation", "allow_duplicate_host"):
+            if not isinstance(authority_value[field_name], bool):
+                raise AuthorizationError(
+                    "INVALID_AUTHORITY_POLICY", f"authority.{field_name} must be boolean"
+                )
+        if authority_value["sni_policy"] != "match-target":
+            raise AuthorizationError(
+                "INVALID_AUTHORITY_POLICY", "semantic HTTP requires SNI to match the target"
+            )
+        if authority_value["proxy_connect_authority_policy"] != "match-target":
+            raise AuthorizationError(
+                "INVALID_AUTHORITY_POLICY", "proxy CONNECT authority must match the target"
+            )
+        authority = AuthorityPolicy(
+            mode=str(authority_value["mode"]),
+            allowed_host_fields=allowed_authorities,
+            allow_host_mutation=bool(authority_value["allow_host_mutation"]),
+            allow_duplicate_host=False,
+            sni_policy="match-target",
+            proxy_connect_authority_policy="match-target",
+        )
+
     redirect_value = payload["redirects"]
     if not isinstance(redirect_value, dict):
         raise AuthorizationError("INVALID_MANIFEST_FIELD", "redirects must be an object")
-    _expect_keys(
-        redirect_value,
-        allowed={"mode", "maximum_depth", "forward_credentials_cross_origin"},
-        required={"mode", "maximum_depth", "forward_credentials_cross_origin"},
-        name="redirects",
-    )
+    if schema_version == "mrma.authorization/v1":
+        redirect_keys = {"mode", "maximum_depth", "forward_credentials_cross_origin"}
+    else:
+        redirect_keys = {"mode", "maximum_depth", "cross_origin_headers"}
+    _expect_keys(redirect_value, allowed=redirect_keys, required=redirect_keys, name="redirects")
     if redirect_value["mode"] not in {"deny", "same-origin", "authorized-targets"}:
         raise AuthorizationError("INVALID_REDIRECT_POLICY", "unknown redirect mode")
     if not isinstance(redirect_value["maximum_depth"], int) or not 0 <= redirect_value["maximum_depth"] <= 20:
         raise AuthorizationError("INVALID_REDIRECT_POLICY", "maximum_depth must be in 0..20")
-    if not isinstance(redirect_value["forward_credentials_cross_origin"], bool):
-        raise AuthorizationError("INVALID_REDIRECT_POLICY", "credential forwarding flag must be boolean")
+    if schema_version == "mrma.authorization/v1":
+        if not isinstance(redirect_value["forward_credentials_cross_origin"], bool):
+            raise AuthorizationError(
+                "INVALID_REDIRECT_POLICY", "credential forwarding flag must be boolean"
+            )
+        cross_origin_headers = CrossOriginHeaderPolicy(
+            mode="explicit" if redirect_value["forward_credentials_cross_origin"] else "safe-default",
+            allow=("*",) if redirect_value["forward_credentials_cross_origin"] else (),
+        )
+    else:
+        cross_origin_value = redirect_value["cross_origin_headers"]
+        if not isinstance(cross_origin_value, dict):
+            raise AuthorizationError(
+                "INVALID_REDIRECT_POLICY", "redirects.cross_origin_headers must be an object"
+            )
+        _expect_keys(
+            cross_origin_value,
+            allowed={"mode", "allow"},
+            required={"mode", "allow"},
+            name="redirects.cross_origin_headers",
+        )
+        if cross_origin_value["mode"] not in {"safe-default", "explicit"}:
+            raise AuthorizationError("INVALID_REDIRECT_POLICY", "unknown cross-origin header mode")
+        header_allow = _header_names(
+            cross_origin_value["allow"], "redirects.cross_origin_headers.allow"
+        )
+        if cross_origin_value["mode"] == "safe-default" and header_allow:
+            raise AuthorizationError(
+                "INVALID_REDIRECT_POLICY", "safe-default mode does not accept additional headers"
+            )
+        cross_origin_headers = CrossOriginHeaderPolicy(
+            mode=str(cross_origin_value["mode"]),
+            allow=header_allow,
+        )
     redirects = RedirectPolicy(
-        redirect_value["mode"],
-        redirect_value["maximum_depth"],
-        redirect_value["forward_credentials_cross_origin"],
+        str(redirect_value["mode"]),
+        int(redirect_value["maximum_depth"]),
+        cross_origin_headers,
     )
+
+    mutation_value = payload.get("mutation_policy")
+    header_mutations: HeaderMutationPolicy | None = None
+    if schema_version == AUTHORIZATION_SCHEMA_VERSION:
+        if not isinstance(mutation_value, dict):
+            raise AuthorizationError("INVALID_MUTATION_POLICY", "mutation_policy must be an object")
+        _expect_keys(
+            mutation_value,
+            allowed={"headers"},
+            required={"headers"},
+            name="mutation_policy",
+        )
+        header_value = mutation_value["headers"]
+        if not isinstance(header_value, dict):
+            raise AuthorizationError(
+                "INVALID_MUTATION_POLICY", "mutation_policy.headers must be an object"
+            )
+        header_keys = {"allow_names", "deny_names", "operations", "maximum_value_bytes"}
+        _expect_keys(
+            header_value,
+            allowed=header_keys,
+            required=header_keys,
+            name="mutation_policy.headers",
+        )
+        allow_names = _header_names(
+            header_value["allow_names"], "mutation_policy.headers.allow_names"
+        )
+        deny_names = _header_names(
+            header_value["deny_names"], "mutation_policy.headers.deny_names"
+        )
+        if set(allow_names) & set(deny_names):
+            raise AuthorizationError(
+                "INVALID_MUTATION_POLICY", "allowed and denied header names overlap"
+            )
+        operations = _strings(
+            header_value["operations"], "mutation_policy.headers.operations", nonempty=False
+        )
+        if any(operation not in {"add", "replace", "remove"} for operation in operations):
+            raise AuthorizationError("INVALID_MUTATION_POLICY", "unknown header operation")
+        maximum_value_bytes = header_value["maximum_value_bytes"]
+        if (
+            not isinstance(maximum_value_bytes, int)
+            or isinstance(maximum_value_bytes, bool)
+            or not 0 <= maximum_value_bytes <= 65536
+        ):
+            raise AuthorizationError(
+                "INVALID_MUTATION_POLICY", "maximum_value_bytes must be in 0..65536"
+            )
+        header_mutations = HeaderMutationPolicy(
+            allow_names, deny_names, operations, maximum_value_bytes
+        )
 
     metadata_value = payload.get("organizational_metadata", {})
     if not isinstance(metadata_value, dict) or any(
@@ -455,7 +764,7 @@ def load_authorization_manifest(path: str | Path) -> AuthorizationManifest:
     if supplied_digest is not None and supplied_digest != digest:
         raise AuthorizationError("AUTHORIZATION_DIGEST_MISMATCH", "authorization_digest does not match manifest")
     return AuthorizationManifest(
-        schema_version=AUTHORIZATION_SCHEMA_VERSION,
+        schema_version=str(schema_version),
         engagement_id=payload["engagement_id"],
         issuer=payload["issuer"],
         subject=payload["subject"],
@@ -463,9 +772,11 @@ def load_authorization_manifest(path: str | Path) -> AuthorizationManifest:
         expires_at=expires_at,
         rules=rules,
         proxy=proxy,
+        authority=authority,
         redirects=redirects,
         mutation_families=_strings(payload["mutation_families"], "mutation_families"),
         mutation_risk_classes=mutation_risk_classes,
+        header_mutations=header_mutations,
         organizational_metadata=tuple(sorted(metadata_value.items())),
         budget=budget,
         digest=digest,
@@ -493,6 +804,38 @@ def _path_allowed(path: str, prefixes: tuple[str, ...]) -> bool:
         if normalized == "/" or path == normalized or path.startswith(normalized + "/"):
             return True
     return False
+
+
+def _query_allowed(query: str, policy: QueryPolicy) -> bool:
+    try:
+        query_bytes = query.encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    if len(query_bytes) > policy.maximum_query_bytes:
+        return False
+    if query and re.search(r"%(?![0-9A-Fa-f]{2})", query):
+        return False
+    if policy.mode == "deny":
+        return not query
+    try:
+        keys = {
+            key
+            for key, _value in parse_qsl(
+                query,
+                keep_blank_values=True,
+                strict_parsing=False,
+                encoding="utf-8",
+                errors="strict",
+                max_num_fields=128,
+            )
+        }
+    except (UnicodeDecodeError, ValueError):
+        return False
+    if keys & set(policy.forbidden_keys):
+        return False
+    if policy.mode == "allow-any":
+        return True
+    return keys <= set(policy.allowed_keys) and set(policy.required_keys) <= keys
 
 
 def _target_url(request: RawRequest, base_url: str) -> str:
@@ -535,6 +878,60 @@ def request_fingerprint(request: RawRequest, canonical_url: str) -> str:
     return "sha256:" + hashlib.sha256(_canonical_json(payload)).hexdigest()
 
 
+def _effective_authorities(
+    request: RawRequest,
+    canonical_url: str,
+    policy: AuthorityPolicy,
+    *,
+    proxy_url: str | None,
+    mutation_family: str | None,
+) -> tuple[str, str | None, str | None]:
+    parsed = urlsplit(canonical_url)
+    scheme = parsed.scheme.lower()
+    default_port = 443 if scheme == "https" else 80
+    target_host = _canonical_host(parsed.hostname or "")
+    target_port = parsed.port or default_port
+    target_authority = _authority_text(target_host, target_port, scheme)
+    host_fields = [value for name, value in request.headers if name.lower() == "host"]
+    if len(host_fields) > 1:
+        raise AuthorizationError("DUPLICATE_HOST_REJECTED", "multiple Host fields are forbidden")
+    if host_fields:
+        host, port = _parse_authority(host_fields[0], default_port=default_port)
+        assert port is not None
+        effective_host = _authority_text(host, port, scheme)
+    else:
+        host, port = target_host, target_port
+        effective_host = target_authority
+
+    target_pair = (target_host, target_port)
+    effective_pair = (host, port)
+    if policy.mode == "match-target" and effective_pair != target_pair:
+        raise AuthorizationError(
+            "HOST_AUTHORITY_NOT_AUTHORIZED", "Host authority must match the target URL"
+        )
+    if policy.mode == "explicit":
+        allowed = {
+            _parse_authority(item, default_port=default_port)
+            for item in policy.allowed_host_fields
+        }
+        if effective_pair not in allowed:
+            raise AuthorizationError(
+                "HOST_AUTHORITY_NOT_AUTHORIZED", "Host authority is outside explicit policy"
+            )
+    if (
+        mutation_family == "header"
+        and effective_pair != target_pair
+        and not policy.allow_host_mutation
+    ):
+        raise AuthorizationError(
+            "HOST_MUTATION_NOT_AUTHORIZED", "Host mutation requires explicit authorization"
+        )
+
+    sni_authority = target_host if scheme == "https" else None
+    connect_authority = target_authority if proxy_url is not None and scheme == "https" else None
+    return effective_host, sni_authority, connect_authority
+
+
 class ManifestAuthorizationPolicy:
     def __init__(
         self,
@@ -557,6 +954,55 @@ class ManifestAuthorizationPolicy:
         if current >= self.manifest.expires_at:
             raise AuthorizationError("AUTHORIZATION_EXPIRED", "authorization has expired")
         return current
+
+    def validate_mutation(
+        self,
+        baseline: RawRequest,
+        mutation: RawRequest,
+        *,
+        mutation_family: str,
+    ) -> None:
+        if mutation_family != "header" or self.manifest.header_mutations is None:
+            return
+        policy = self.manifest.header_mutations
+        before: dict[str, list[str]] = {}
+        after: dict[str, list[str]] = {}
+        for name, value in baseline.headers:
+            before.setdefault(name.lower(), []).append(value)
+        for name, value in mutation.headers:
+            after.setdefault(name.lower(), []).append(value)
+        for name in sorted(set(before) | set(after)):
+            old_values = before.get(name, [])
+            new_values = after.get(name, [])
+            if old_values == new_values:
+                continue
+            operation = "add" if not old_values else "remove" if not new_values else "replace"
+            if name in policy.deny_names or name not in policy.allow_names:
+                raise AuthorizationError(
+                    "HEADER_MUTATION_NOT_AUTHORIZED",
+                    f"header mutation for {name!r} is outside policy",
+                )
+            if operation not in policy.operations:
+                raise AuthorizationError(
+                    "HEADER_MUTATION_OPERATION_NOT_AUTHORIZED",
+                    f"{operation} is outside header mutation policy",
+                )
+            try:
+                value_lengths = [len(value.encode("latin-1")) for value in new_values]
+            except UnicodeEncodeError as exc:
+                raise AuthorizationError(
+                    "INVALID_HEADER_VALUE",
+                    f"header mutation for {name!r} is not representable as HTTP/1 field bytes",
+                ) from exc
+            if any(length > policy.maximum_value_bytes for length in value_lengths):
+                raise AuthorizationError(
+                    "HEADER_MUTATION_VALUE_TOO_LARGE",
+                    f"header mutation for {name!r} exceeds the value limit",
+                )
+            if name == "host" and not self.manifest.authority.allow_host_mutation:
+                raise AuthorizationError(
+                    "HOST_MUTATION_NOT_AUTHORIZED", "Host mutation requires explicit authorization"
+                )
 
     def _authorize_proxy(self, proxy_url: str | None) -> tuple[str, ...]:
         if proxy_url is None:
@@ -678,6 +1124,13 @@ class ManifestAuthorizationPolicy:
         scheme = parsed.scheme.lower()
         port = parsed.port or (443 if scheme == "https" else 80)
         method = request.method
+        effective_host, sni_authority, connect_authority = _effective_authorities(
+            request,
+            canonical,
+            self.manifest.authority,
+            proxy_url=proxy_url,
+            mutation_family=mutation_family,
+        )
         method_risk = classify_method(method)
         declared_risk = risk_class or "safe"
         if declared_risk not in RISK_RANK:
@@ -702,6 +1155,7 @@ class ManifestAuthorizationPolicy:
                 and method in rule.methods
                 and attempt_kind in rule.attempt_kinds
                 and _path_allowed(parsed.path or "/", rule.path_prefixes)
+                and _query_allowed(parsed.query, rule.query_policy)
                 and len(request.body) <= rule.maximum_request_body_bytes
             ):
                 matched = (index, rule)
@@ -755,6 +1209,19 @@ class ManifestAuthorizationPolicy:
             target_fingerprint=f"sha256:{target_fingerprint}",
             address_set_fingerprint=f"sha256:{address_fingerprint}",
             proxy_address_set_fingerprint=proxy_address_fingerprint,
+            host_authority_fingerprint=(
+                "sha256:" + hashlib.sha256(effective_host.encode()).hexdigest()
+            ),
+            sni_authority_fingerprint=(
+                "sha256:" + hashlib.sha256(sni_authority.encode()).hexdigest()
+                if sni_authority is not None
+                else None
+            ),
+            proxy_connect_authority_fingerprint=(
+                "sha256:" + hashlib.sha256(connect_authority.encode()).hexdigest()
+                if connect_authority is not None
+                else None
+            ),
             canonical_origin=origin,
             method=method,
             attempt_kind=attempt_kind,
@@ -767,4 +1234,5 @@ class ManifestAuthorizationPolicy:
             rule_index=rule_index,
             request_fingerprint=request_fingerprint(request, canonical),
             proxy_url=proxy_url,
+            effective_host_authority=effective_host,
         )

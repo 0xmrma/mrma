@@ -4,28 +4,31 @@ MRMA is an authorization-enforcing, budgeted, recoverable HTTP trust-influence r
 It runs repeated control/mutation experiments to test whether one request property reproducibly
 changes an observed HTTP outcome.
 
-> **Status: v0.4.0 research preview and expert-review candidate.** MRMA uses a semantic HTTPX
-> transport. It does not provide wire-exact replay, prove exploitability, identify a proprietary
-> component from black-box behavior, or claim enterprise readiness.
+> **Status: v0.4.1 research release.** MRMA uses a semantic HTTPX transport. It does not provide
+> wire-exact replay, prove exploitability, or identify a proprietary component from black-box
+> behavior.
 
-## What v0.4.0 enforces
+## What v0.4.1 enforces
 
-- Every network attempt requires an accepted `mrma.authorization/v1` decision, a central budget
+- Every network attempt requires an accepted authorization decision, a central budget
   lease, and journal context.
-- Redirects are followed manually and reauthorized at every hop. Retries and setup/reset hooks are
-  separate charged attempts.
+- `mrma.authorization/v2` binds URL, `Host`, TLS SNI, and proxy CONNECT authority policy; it also
+  constrains query keys and exact header mutation operations.
+- Redirects are followed manually, reauthorized, and charged at every hop. Cross-origin request
+  fields use a deny-by-default forwarding policy, and redirect cookies live only for one logical
+  observation under isolated state.
 - Research assurance uses isolated state, fresh observation clients, disabled retries, bounded
   bodies, and a predeclared fixed sample.
 - Partial or resource-limited work returns `INCONCLUSIVE` with structured limitations.
-- `mrma.experiment/v7` evidence records policy, budget, journal, comparison, semantic, transport,
-  and runtime provenance without embedding the executable authorization grant.
+- `mrma.experiment/v8` evidence binds the effective plan and accurately distinguishes run-local
+  fingerprints from deterministically linkable policy identifiers.
 - Deterministic evidence bundles include the result, append-only hash-chained journal, schema,
   release benchmark, runtime manifest, digests, and replay instructions.
 
 ## Install
 
 ```bash
-python -m pip install mrma==0.4.0
+python -m pip install mrma==0.4.1
 mrma --version
 ```
 
@@ -33,7 +36,7 @@ Python 3.10 and 3.13 are tested on Linux, Windows, and macOS (six CI environment
 
 ## Start locally
 
-Run the loopback-only expert benchmark; it sends no traffic to public targets:
+Run the loopback validation corpus; it sends no traffic to public targets:
 
 ```bash
 mrma benchmark --out-json benchmark.json
@@ -58,7 +61,7 @@ mrma experiment \
   --dry-run
 ```
 
-Remove `--dry-run` to execute and create a review bundle:
+Remove `--dry-run` to execute and create an evidence bundle:
 
 ```bash
 mrma experiment \
@@ -92,16 +95,16 @@ initialized.
 
 ## Workflow status
 
-| Workflow | v0.4 status |
+| Workflow | Current status |
 |---|---|
-| `experiment` | Confirmatory fixed-sample `ExperimentOracle`; strict v7 result |
+| `experiment` | Confirmatory fixed-sample `ExperimentOracle`; strict v8 result |
 | `impact` | Exploratory ranking through the policy kernel; emits a candidate manifest |
 | `run`, `diff`, `discover`, `isolate`, profiles, report | Authorization/budget/journal guarded, but statistically exploratory |
 | Candidate confirmation | Independent `experiment` run bound to one candidate-manifest digest |
 
 ## Documentation
 
-- [Expert review](docs/EXPERT_REVIEW.md)
+- [Validation](docs/VALIDATION.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Threat model](docs/THREAT_MODEL.md)
 - [Authorization](docs/AUTHORIZATION.md)
@@ -120,12 +123,6 @@ Use MRMA only against targets and request effects explicitly authorized by the t
 state-changing methods, path scope, redirect destinations, CIDRs, rates, byte limits, and expiry as
 narrow as the research design permits. Report security defects through GitHub's private Security
 Advisory flow as described in [SECURITY.md](SECURITY.md).
-
-## Positioning
-
-MRMA v0.4.0 is an authorization-enforcing, budgeted, recoverable HTTP trust-influence research
-platform prepared for external expert evaluation. It remains a semantic-HTTP research tool; full
-product-wide oracle migration and protocol-exact HTTP backends are separate future milestones.
 
 ## Author
 
