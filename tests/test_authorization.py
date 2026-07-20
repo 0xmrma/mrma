@@ -32,6 +32,41 @@ def policy(
     return ManifestAuthorizationPolicy(manifest, resolver=lambda _host, _port: addresses)
 
 
+def authorization_v2(payload: dict[str, object]) -> dict[str, object]:
+    upgraded = deepcopy(payload)
+    upgraded["schema_version"] = "mrma.authorization/v2"
+    for rule in upgraded["rules"]:
+        rule["query_policy"] = {
+            "mode": "allow-any",
+            "allowed_keys": [],
+            "required_keys": [],
+            "forbidden_keys": [],
+            "maximum_query_bytes": 4096,
+        }
+    upgraded["authority"] = {
+        "mode": "match-target",
+        "allowed_host_fields": [],
+        "allow_host_mutation": False,
+        "allow_duplicate_host": False,
+        "sni_policy": "match-target",
+        "proxy_connect_authority_policy": "match-target",
+    }
+    upgraded["redirects"] = {
+        "mode": "authorized-targets",
+        "maximum_depth": 4,
+        "cross_origin_headers": {"mode": "safe-default", "allow": []},
+    }
+    upgraded["mutation_policy"] = {
+        "headers": {
+            "allow_names": ["X-Probe"],
+            "deny_names": ["Authorization", "Cookie", "Proxy-Authorization", "Host"],
+            "operations": ["add", "replace", "remove"],
+            "maximum_value_bytes": 256,
+        }
+    }
+    return upgraded
+
+
 def test_manifest_authorizes_exact_target_and_explicit_private_range(
     authorization_payload,
     write_authorization,
@@ -258,6 +293,314 @@ def test_authorization_schema_accepts_fixture_and_rejects_unknown_fields(
     invalid = deepcopy(authorization_payload)
     invalid["rules"][0]["unexpected"] = True
     assert list(validator.iter_errors(invalid))
+
+
+def test_authorization_v2_binds_host_authority_and_rejects_duplicates(
+    authorization_payload,
+    write_authorization,
+):
+    payload = authorization_v2(authorization_payload)
+    guarded = policy(payload, write_authorization)
+
+    unauthorized_host = request()
+    unauthorized_host.headers.append(("Host", "internal-admin.test"))
+    with pytest.raises(AuthorizationError, match="HOST_AUTHORITY_NOT_AUTHORIZED"):
+        guarded.authorize(
+            unauthorized_host,
+            base_url="http://example.test",
+            attempt_kind="control",
+            risk_class="safe",
+        )
+
+    duplicate_host = request()
+    duplicate_host.headers.extend([("Host", "example.test"), ("host", "example.test")])
+    with pytest.raises(AuthorizationError, match="DUPLICATE_HOST_REJECTED"):
+        guarded.authorize(
+            duplicate_host,
+            base_url="http://example.test",
+            attempt_kind="control",
+            risk_class="safe",
+        )
+
+    for value in (
+        "internal admin.test",
+        "example.test:",
+        "example\\evil.test",
+        "exa%6dple.test",
+        "example.test\x00",
+    ):
+        malformed_host = request()
+        malformed_host.headers.append(("Host", value))
+        with pytest.raises(AuthorizationError, match="INVALID_HOST_AUTHORITY"):
+            guarded.authorize(
+                malformed_host,
+                base_url="http://example.test",
+                attempt_kind="control",
+                risk_class="safe",
+            )
+
+
+def test_authorization_v2_accepts_only_explicit_host_mutation(
+    authorization_payload,
+    write_authorization,
+):
+    payload = authorization_v2(authorization_payload)
+    payload["authority"] = {
+        "mode": "explicit",
+        "allowed_host_fields": ["example.test", "alternate-vhost.test"],
+        "allow_host_mutation": True,
+        "allow_duplicate_host": False,
+        "sni_policy": "match-target",
+        "proxy_connect_authority_policy": "match-target",
+    }
+    payload["mutation_policy"]["headers"] = {
+        "allow_names": ["Host"],
+        "deny_names": [],
+        "operations": ["add"],
+        "maximum_value_bytes": 256,
+    }
+    guarded = policy(payload, write_authorization)
+    baseline = request()
+    mutation = request()
+    mutation.headers.append(("Host", "alternate-vhost.test"))
+
+    guarded.validate_mutation(baseline, mutation, mutation_family="header")
+    context = guarded.authorize(
+        mutation,
+        base_url="http://example.test",
+        attempt_kind="mutation",
+        mutation_family="header",
+        risk_class="safe",
+    )
+
+    assert context.effective_host_authority == "alternate-vhost.test"
+    assert context.decision.host_authority_fingerprint.startswith("sha256:")
+    assert context.decision.sni_authority_fingerprint is None
+
+
+def test_authorization_v2_rejects_canonically_duplicate_authorities(
+    authorization_payload,
+    write_authorization,
+):
+    payload = authorization_v2(authorization_payload)
+    payload["authority"] = {
+        "mode": "explicit",
+        "allowed_host_fields": ["EXAMPLE.test", "example.test."],
+        "allow_host_mutation": True,
+        "allow_duplicate_host": False,
+        "sni_policy": "match-target",
+        "proxy_connect_authority_policy": "match-target",
+    }
+
+    with pytest.raises(AuthorizationError, match="canonically duplicate"):
+        policy(payload, write_authorization)
+
+
+def test_authorization_v2_rejects_invalid_policy_combinations(
+    authorization_payload,
+    write_authorization,
+):
+    invalid_cases: list[tuple[dict[str, object], str]] = []
+
+    def add(mutator, code: str) -> None:
+        payload = authorization_v2(authorization_payload)
+        mutator(payload)
+        invalid_cases.append((payload, code))
+
+    add(lambda payload: payload.__setitem__("authority", None), "INVALID_AUTHORITY_POLICY")
+    add(
+        lambda payload: payload["authority"].__setitem__("mode", "unknown"),
+        "INVALID_AUTHORITY_POLICY",
+    )
+    add(
+        lambda payload: payload["authority"].__setitem__("allow_duplicate_host", True),
+        "INVALID_AUTHORITY_POLICY",
+    )
+    add(
+        lambda payload: payload["authority"].__setitem__("allow_host_mutation", "yes"),
+        "INVALID_AUTHORITY_POLICY",
+    )
+    add(
+        lambda payload: payload["authority"].__setitem__("sni_policy", "explicit"),
+        "INVALID_AUTHORITY_POLICY",
+    )
+    add(
+        lambda payload: payload["authority"].__setitem__(
+            "proxy_connect_authority_policy", "explicit"
+        ),
+        "INVALID_AUTHORITY_POLICY",
+    )
+    add(
+        lambda payload: payload["redirects"].__setitem__("cross_origin_headers", None),
+        "INVALID_REDIRECT_POLICY",
+    )
+    add(
+        lambda payload: payload["redirects"]["cross_origin_headers"].__setitem__(
+            "mode", "unknown"
+        ),
+        "INVALID_REDIRECT_POLICY",
+    )
+    add(
+        lambda payload: payload["redirects"]["cross_origin_headers"].__setitem__(
+            "allow", ["X-Trace"]
+        ),
+        "INVALID_REDIRECT_POLICY",
+    )
+    add(lambda payload: payload.__setitem__("mutation_policy", None), "INVALID_MUTATION_POLICY")
+    add(
+        lambda payload: payload["mutation_policy"].__setitem__("headers", None),
+        "INVALID_MUTATION_POLICY",
+    )
+    add(
+        lambda payload: payload["mutation_policy"]["headers"].__setitem__(
+            "deny_names", ["X-Probe"]
+        ),
+        "INVALID_MUTATION_POLICY",
+    )
+    add(
+        lambda payload: payload["mutation_policy"]["headers"].__setitem__(
+            "operations", ["copy"]
+        ),
+        "INVALID_MUTATION_POLICY",
+    )
+    add(
+        lambda payload: payload["mutation_policy"]["headers"].__setitem__(
+            "maximum_value_bytes", -1
+        ),
+        "INVALID_MUTATION_POLICY",
+    )
+
+    for payload, code in invalid_cases:
+        with pytest.raises(AuthorizationError, match=code):
+            policy(payload, write_authorization)
+
+
+def test_authorization_v2_rejects_invalid_query_policy_combinations(
+    authorization_payload,
+    write_authorization,
+):
+    invalid_policies = [
+        None,
+        {
+            "mode": "unknown",
+            "allowed_keys": [],
+            "required_keys": [],
+            "forbidden_keys": [],
+            "maximum_query_bytes": 10,
+        },
+        {
+            "mode": "allow-any",
+            "allowed_keys": [],
+            "required_keys": [],
+            "forbidden_keys": [],
+            "maximum_query_bytes": -1,
+        },
+        {
+            "mode": "explicit",
+            "allowed_keys": ["page"],
+            "required_keys": [],
+            "forbidden_keys": ["page"],
+            "maximum_query_bytes": 10,
+        },
+        {
+            "mode": "allow-any",
+            "allowed_keys": ["page"],
+            "required_keys": [],
+            "forbidden_keys": [],
+            "maximum_query_bytes": 10,
+        },
+        {
+            "mode": "deny",
+            "allowed_keys": [],
+            "required_keys": [],
+            "forbidden_keys": ["token"],
+            "maximum_query_bytes": 10,
+        },
+        {
+            "mode": "explicit",
+            "allowed_keys": ["page"],
+            "required_keys": ["lang"],
+            "forbidden_keys": [],
+            "maximum_query_bytes": 10,
+        },
+    ]
+    for query_policy in invalid_policies:
+        payload = authorization_v2(authorization_payload)
+        payload["rules"][0]["query_policy"] = query_policy
+        with pytest.raises(AuthorizationError, match="INVALID_QUERY_POLICY"):
+            policy(payload, write_authorization)
+
+
+def test_authorization_v2_enforces_query_and_header_mutation_scope(
+    authorization_payload,
+    write_authorization,
+):
+    payload = authorization_v2(authorization_payload)
+    payload["rules"][0]["query_policy"] = {
+        "mode": "explicit",
+        "allowed_keys": ["page", "lang"],
+        "required_keys": ["page"],
+        "forbidden_keys": ["token"],
+        "maximum_query_bytes": 64,
+    }
+    guarded = policy(payload, write_authorization)
+    guarded.authorize(
+        request(path="/allowed?page=1&lang=en"),
+        base_url="http://example.test",
+        attempt_kind="control",
+        risk_class="safe",
+    )
+    with pytest.raises(AuthorizationError, match="TARGET_NOT_AUTHORIZED"):
+        guarded.authorize(
+            request(path="/allowed?page=1&token=secret"),
+            base_url="http://example.test",
+            attempt_kind="control",
+            risk_class="safe",
+        )
+
+    baseline = request()
+    forbidden = request()
+    forbidden.headers.append(("Authorization", "secret"))
+    with pytest.raises(AuthorizationError, match="HEADER_MUTATION_NOT_AUTHORIZED"):
+        guarded.validate_mutation(baseline, forbidden, mutation_family="header")
+
+    non_octet = request()
+    non_octet.headers.append(("X-Probe", "snowman-\u2603"))
+    with pytest.raises(AuthorizationError, match="INVALID_HEADER_VALUE"):
+        guarded.validate_mutation(baseline, non_octet, mutation_family="header")
+
+    oversized = request()
+    oversized.headers.append(("X-Probe", "x" * 257))
+    with pytest.raises(AuthorizationError, match="HEADER_MUTATION_VALUE_TOO_LARGE"):
+        guarded.validate_mutation(baseline, oversized, mutation_family="header")
+
+
+def test_authorization_v2_rejects_malformed_and_bounded_queries(
+    authorization_payload,
+    write_authorization,
+):
+    payload = authorization_v2(authorization_payload)
+    payload["rules"][0]["query_policy"]["maximum_query_bytes"] = 8
+    guarded = policy(payload, write_authorization)
+
+    for path in ("/allowed?too-long=1", "/allowed?bad=%GG"):
+        with pytest.raises(AuthorizationError, match="TARGET_NOT_AUTHORIZED"):
+            guarded.authorize(
+                request(path=path),
+                base_url="http://example.test",
+                attempt_kind="control",
+                risk_class="safe",
+            )
+
+
+def test_authorization_v2_schema_is_strict(authorization_payload):
+    payload = authorization_v2(authorization_payload)
+    schema = json.loads(Path("mrma/schemas/authorization-v2.schema.json").read_text())
+    validator = Draft202012Validator(schema)
+
+    validator.validate(payload)
+    payload["authority"]["allow_duplicate_host"] = True
+    assert list(validator.iter_errors(payload))
 
 
 def test_attempt_kind_and_disposable_hook_policy_are_explicit(

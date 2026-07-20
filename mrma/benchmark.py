@@ -29,8 +29,8 @@ from mrma.policy.budget import BudgetLedger, BudgetLimits
 from mrma.policy.comparison import ComparisonPolicy
 from mrma.transport import SemanticHttpAdapter
 
-BENCHMARK_SCHEMA_VERSION = "mrma.benchmark/v1"
-BENCHMARK_CORPUS_VERSION = "expert-loopback-corpus/1.0"
+BENCHMARK_SCHEMA_VERSION = "mrma.benchmark/v2"
+BENCHMARK_CORPUS_VERSION = "trust-influence-loopback/2.0"
 
 
 @dataclass(frozen=True)
@@ -195,7 +195,7 @@ def _authorization_payload(
     if budget:
         limits.update(budget)
     return {
-        "schema_version": "mrma.authorization/v1",
+        "schema_version": "mrma.authorization/v2",
         "engagement_id": "mrma-local-benchmark",
         "issuer": "mrma-benchmark-runner",
         "subject": "local-process",
@@ -222,16 +222,39 @@ def _authorization_payload(
                 "maximum_repetitions_by_method": {},
                 "require_idempotency_key": [],
                 "disposable_environment": True,
+                "query_policy": {
+                    "mode": "allow-any",
+                    "allowed_keys": [],
+                    "required_keys": [],
+                    "forbidden_keys": [],
+                    "maximum_query_bytes": 4096,
+                },
             }
         ],
         "proxy": {"mode": "deny", "hosts": [], "ports": [], "cidrs": []},
+        "authority": {
+            "mode": "match-target",
+            "allowed_host_fields": [],
+            "allow_host_mutation": False,
+            "allow_duplicate_host": False,
+            "sni_policy": "match-target",
+            "proxy_connect_authority_policy": "match-target",
+        },
         "redirects": {
             "mode": "authorized-targets",
             "maximum_depth": 4,
-            "forward_credentials_cross_origin": False,
+            "cross_origin_headers": {"mode": "safe-default", "allow": []},
         },
         "mutation_families": ["header"],
         "mutation_risk_classes": ["safe"],
+        "mutation_policy": {
+            "headers": {
+                "allow_names": ["X-Probe"],
+                "deny_names": ["Authorization", "Cookie", "Proxy-Authorization", "Host"],
+                "operations": ["add", "replace", "remove"],
+                "maximum_value_bytes": 256,
+            }
+        },
         "budget": limits,
         "organizational_metadata": {},
     }

@@ -45,9 +45,30 @@ MUTATIONS = (
     Mutation(
         "AUTH-METHOD-CASE",
         "mrma/policy/authorization.py",
-        "method = request.method\n        method_risk = classify_method(method)",
-        "method = request.method.upper()\n        method_risk = classify_method(method)",
+        "method = request.method",
+        "method = request.method.upper()",
         ("tests/test_authorization.py::test_authorized_method_tokens_are_case_sensitive",),
+    ),
+    Mutation(
+        "AUTH-DUPLICATE-HOST",
+        "mrma/policy/authorization.py",
+        "if len(host_fields) > 1:",
+        "if len(host_fields) > 2:",
+        ("tests/test_authorization.py::test_authorization_v2_binds_host_authority_and_rejects_duplicates",),
+    ),
+    Mutation(
+        "AUTH-HOST-MATCH",
+        "mrma/policy/authorization.py",
+        'if policy.mode == "match-target" and effective_pair != target_pair:',
+        'if policy.mode == "match-target" and effective_pair == target_pair:',
+        ("tests/test_authorization.py::test_authorization_v2_binds_host_authority_and_rejects_duplicates",),
+    ),
+    Mutation(
+        "AUTH-QUERY-POLICY",
+        "mrma/policy/authorization.py",
+        "and _query_allowed(parsed.query, rule.query_policy)",
+        "and True",
+        ("tests/test_authorization.py::test_authorization_v2_enforces_query_and_header_mutation_scope",),
     ),
     Mutation(
         "AUTH-REPETITION-BOUNDARY",
@@ -99,11 +120,32 @@ MUTATIONS = (
         ("tests/test_experiment.py::test_missing_content_type_defaults_to_digest_only_evidence",),
     ),
     Mutation(
+        "REDIRECT-CROSS-ORIGIN-FIELDS",
+        "mrma/engine/oracle.py",
+        "if cross_origin and not allow_all_cross_origin and lowered not in cross_origin_fields:",
+        "if False and not allow_all_cross_origin and lowered not in cross_origin_fields:",
+        ("tests/test_oracle.py::test_redirect_method_and_credential_policy_transformations",),
+    ),
+    Mutation(
+        "OBSERVATION-SESSION-STATE",
+        "mrma/core/http_client.py",
+        "if active is None:\n            client, close_after = self._client_for(arm, round_index)\n            self._before_observation(client, arm)",
+        "if active is not None:\n            client, close_after = self._client_for(arm, round_index)\n            self._before_observation(client, arm)",
+        ("tests/test_oracle.py::test_isolated_observation_preserves_redirect_cookie_only_inside_chain",),
+    ),
+    Mutation(
+        "PLAN-BODY-IDENTITY",
+        "mrma/engine/plan.py",
+        '"body_fingerprint": redactor.fingerprint(request.body, label="plan-request-body"),',
+        '"body_fingerprint": "hmac-sha256:" + "0" * 64,',
+        ("tests/test_oracle.py::test_plan_digest_binds_effective_request_and_decision_policy",),
+    ),
+    Mutation(
         "PARTIAL-COMPLETE-SAMPLING",
         "mrma/evidence/models.py",
         'result.status == "completed"\n        and result.completed_rounds',
         "result.completed_rounds",
-        ("tests/test_oracle.py::test_partial_outcomes_are_valid_v7_evidence",),
+        ("tests/test_oracle.py::test_partial_outcomes_are_valid_v8_evidence",),
     ),
 )
 

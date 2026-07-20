@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from mrma.engine.oracle import OracleRunResult
     from mrma.engine.plan import ExperimentPlan
 
-EXPERIMENT_SCHEMA_VERSION = "mrma.experiment/v7"
+EXPERIMENT_SCHEMA_VERSION = "mrma.experiment/v8"
 
 
 def _package_version(name: str) -> str | None:
@@ -184,7 +184,7 @@ def _pair(item: PairEvidence, redactor: EvidenceRedactor) -> dict[str, object]:
     }
 
 
-def build_experiment_v7(
+def build_experiment_v8(
     result: OracleRunResult,
     *,
     plan: ExperimentPlan,
@@ -224,6 +224,18 @@ def build_experiment_v7(
         "scope": "budget_accounting",
         "message": "Sent-byte accounting is a conservative semantic estimate, not wire telemetry.",
         "remediation": "Use a future protocol-exact backend when exact wire-byte accounting is required.",
+    }
+    limitations_by_code["CROSS_RUN_POLICY_LINKABILITY"] = {
+        "code": "CROSS_RUN_POLICY_LINKABILITY",
+        "severity": "low",
+        "scope": "evidence_privacy",
+        "message": (
+            "Authorization, source, and journal policy identifiers remain deterministically "
+            "linkable across runs."
+        ),
+        "remediation": (
+            "Share public bundles only with parties permitted to correlate policy provenance."
+        ),
     }
     comparator_failures = sorted(
         {
@@ -320,7 +332,7 @@ def build_experiment_v7(
         "authorization": {
             "validated": True,
             "bypass": False,
-            **authorization.manifest.public_summary(),
+            **authorization.manifest.public_summary(redactor),
         },
         "plan": result.plan.to_dict(),
         "budget": {
@@ -419,8 +431,27 @@ def build_experiment_v7(
         "assurance": assurance,
         "privacy": {
             "policy": redactor.policy,
-            "fingerprints": "per-run keyed HMAC-SHA256",
-            "cross_run_correlation": False,
+            "fingerprint_policy": {
+                "run_local_hmac_fields": [
+                    "authorization identities",
+                    "request targets and values in the effective plan",
+                    "response bodies and values",
+                    "redacted URLs",
+                ],
+                "deterministically_linkable_fields": [
+                    "authorization digest",
+                    "original source digest",
+                    "journal target and origin identifiers",
+                    "journal address-set identifiers",
+                    "journal effective-authority identifiers",
+                ],
+                "cross_run_correlation": "partial",
+            },
         },
         "limitations": [limitations_by_code[key] for key in sorted(limitations_by_code)],
     }
+
+
+def build_experiment_v7(*args: object, **kwargs: object) -> dict[str, object]:
+    """Compatibility alias for callers migrating to the current evidence builder."""
+    return build_experiment_v8(*args, **kwargs)  # type: ignore[arg-type]

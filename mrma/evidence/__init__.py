@@ -15,7 +15,7 @@ from .journal import (
     verify_journal,
     verify_journal_bytes,
 )
-from .models import build_experiment_v7, runtime_provenance
+from .models import build_experiment_v7, build_experiment_v8, runtime_provenance
 
 __all__ = [
     "EvidenceContext",
@@ -24,6 +24,7 @@ __all__ = [
     "JournalEvent",
     "create_evidence_bundle",
     "build_experiment_v7",
+    "build_experiment_v8",
     "runtime_provenance",
     "validate_benchmark_document",
     "validate_result_document",

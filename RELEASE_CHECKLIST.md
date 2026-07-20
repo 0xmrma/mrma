@@ -1,13 +1,13 @@
-# MRMA v0.4.0 release checklist
+# MRMA v0.4.1 release checklist
 
 ## Correctness and security
 
 - [ ] Every network command is covered by the architectural policy-boundary test.
 - [ ] Authorization, budget, redirect, retry, hook, journal, privacy, and partial-result adversarial tests pass.
-- [ ] `mrma.experiment/v7`, authorization v1, benchmark v1, and all negative fixtures validate.
-- [ ] Experiment schemas v2-v6 match committed immutable SHA-256 fixtures.
+- [ ] `mrma.experiment/v8`, authorization v2, benchmark v2, and all negative fixtures validate.
+- [ ] Experiment schemas v2-v7 and authorization v1 match immutable SHA-256 fixtures.
 - [ ] The 22-case loopback benchmark passes with zero false positives/negatives.
-- [ ] Critical semantic mutation gate kills all 12 committed mutants.
+- [ ] Critical semantic mutation gate kills all 18 committed mutants.
 - [ ] No unresolved P0/P1 correctness, authorization, evidence, or secret-exposure issue remains.
 
 ## Quality gates
@@ -24,18 +24,18 @@
 
 ## Distribution and container
 
-- [ ] Version is `0.4.0` in package metadata, import, CLI, wheel, and container.
+- [ ] Version is `0.4.1` in package metadata, import, CLI, wheel, and container.
 - [ ] Wheel and sdist build from a clean tree and pass `twine check`.
 - [ ] Clean wheel install passes `pip check` outside the source tree.
-- [ ] Clean wheel contains experiment v2-v7, authorization v1, benchmark v1, and release baseline.
+- [ ] Clean wheel contains experiment v2-v8, authorization v1-v2, benchmark v1-v2, and release baseline.
 - [ ] Non-root container builds from digest-pinned base and hash-locked dependencies.
 - [ ] Container smoke, local authorized experiment, bundle creation, and offline verification pass.
 - [ ] Multi-architecture OCI publication includes provenance and SBOM; final digest is recorded.
 
 ## Documentation and governance
 
-- [ ] README, SECURITY, ROADMAP, CHANGELOG, expert guide, and all model docs agree.
-- [ ] Product claim remains a research platform/expert-review candidate, not enterprise-ready.
+- [ ] README, SECURITY, ROADMAP, CHANGELOG, validation guide, and all model docs agree.
+- [ ] Product claims remain limited to implemented and verified behavior.
 - [ ] Semantic HTTP, unsigned authorization, DNS/socket binding, exploratory legacy, and hash-chain trust limitations are explicit.
 - [ ] Protected PR checks and review complete without weakening rules.
 - [ ] Release commit is clean; annotated tag is SSH-signed and accepted by release signer policy.
@@ -45,4 +45,4 @@
 ## Final report
 
 - [ ] Record release commit/tag, test/coverage/mutation results, dependency checks, wheel/sdist hashes,
-  OCI digest, evidence verification, migration status, deferred work, and exact conservative positioning.
+  OCI digest, evidence verification, migration status, deferred work, and exact release claims.

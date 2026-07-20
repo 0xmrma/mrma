@@ -12,22 +12,23 @@ redirects, observations, cancellation, failure, and completion. Verification rej
 JSON keys, non-finite numbers, malformed digests, sequence gaps, reorder, truncation, tampering, and
 unknown event types.
 
-## Experiment v7
+## Experiment v8
 
-`mrma.experiment/v7` is strict Draft 2020-12 JSON Schema with nested
+`mrma.experiment/v8` is strict Draft 2020-12 JSON Schema with nested
 `additionalProperties: false`. It includes run state, authorization summary, plan, budget, journal,
 transport/runtime provenance, comparison resource outcomes, charset resolution, observations,
-analysis, exploration/confirmation role, assurance dimensions, and structured limitations.
+analysis, exploration/confirmation role, assurance dimensions, a complete privacy-safe effective
+plan, and structured limitations.
 
 Cross-field constraints and verifier checks prevent decisive verdicts with incomplete sampling,
 research authorization bypass, insecure unacknowledged TLS, exact replay claims from semantic
 HTTP, false durable claims, false complete header coverage, and no-influence conclusions after
-comparison failure. Published experiment schemas v2 through v6 are byte-locked by tests.
+comparison failure. Published experiment schemas v2 through v7 are byte-locked by tests.
 
 ## Partial results
 
 Keyboard interruption, cancellation, authorization rejection, budget exhaustion, transport/policy
-failure, and incomplete transport sampling produce v7-valid partial evidence. Status, planned and
+failure, and incomplete transport sampling produce v8-valid partial evidence. Status, planned and
 completed rounds, stop reason, consumed budget, collected observations, limitations, and
 `INCONCLUSIVE` remain available. Complete sampling requires completed status, exact rounds, and the
 exact planned observation count.
@@ -38,7 +39,9 @@ Standard and strict evidence use per-run keyed fingerprints and reduced timing/t
 Forensic mode retains more exact metadata and requires deliberate use. Public evidence contains a
 summary and digest, not the executable authorization manifest. Raw credentials, proxy credentials,
 authorization tokens, environment values, mutation secrets, and local paths are forbidden by model
-and tests.
+and tests. Version 8 declares cross-run correlation as partial because authorization digests,
+original-source digests, and journal target, origin, address-set, and effective-authority
+identifiers are deterministic.
 
 ## Bundle
 

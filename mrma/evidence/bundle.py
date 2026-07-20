@@ -85,17 +85,26 @@ def _digest(data: bytes) -> str:
 
 
 def _schema_bytes(schema_version: str) -> bytes:
-    if schema_version != "mrma.experiment/v7":
+    if schema_version not in {"mrma.experiment/v7", "mrma.experiment/v8"}:
         raise EvidenceIntegrityError("UNSUPPORTED_EVIDENCE_SCHEMA", schema_version)
-    return files("mrma.schemas").joinpath("experiment-v7.schema.json").read_bytes()
+    version = schema_version.rsplit("/v", 1)[1]
+    return files("mrma.schemas").joinpath(f"experiment-v{version}.schema.json").read_bytes()
 
 
-def _benchmark_schema_bytes() -> bytes:
-    return files("mrma.schemas").joinpath("benchmark-v1.schema.json").read_bytes()
+def _benchmark_schema_bytes(schema_version: str) -> bytes:
+    if schema_version not in {"mrma.benchmark/v1", "mrma.benchmark/v2"}:
+        raise EvidenceIntegrityError("UNSUPPORTED_BENCHMARK_SCHEMA", schema_version)
+    version = schema_version.rsplit("/v", 1)[1]
+    return files("mrma.schemas").joinpath(f"benchmark-v{version}.schema.json").read_bytes()
 
 
 def validate_benchmark_document(document: dict[str, object]) -> dict[str, object]:
-    schema = _load_json(_benchmark_schema_bytes(), label="installed benchmark schema")
+    schema_version = document.get("schema_version")
+    if not isinstance(schema_version, str):
+        raise EvidenceIntegrityError("MISSING_BENCHMARK_SCHEMA", "schema_version is required")
+    schema = _load_json(
+        _benchmark_schema_bytes(schema_version), label="installed benchmark schema"
+    )
     try:
         Draft202012Validator.check_schema(schema)
         Draft202012Validator(schema).validate(document)

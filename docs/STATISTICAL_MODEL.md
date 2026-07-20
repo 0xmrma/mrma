@@ -4,8 +4,10 @@
 
 Confirmatory `experiment` uses a predeclared sample. The default bracketed schedule records
 control-before, mutation, and control-after for each round. A seeded balanced mode uses AB/BA blocks.
-Research assurance fixes 20 bracketed rounds, isolated response-cookie state, fresh observation
-clients, disabled retries, standard privacy, and full retained bodies within the response bound.
+The research assurance preset fixes 20 bracketed rounds, observation-scoped response-cookie state,
+fresh observation clients, disabled retries, standard privacy, and full retained bodies within the
+response bound. Redirects and retries within one observation share that observation's state;
+isolated mode resets it before the next control or mutation observation.
 
 The design does not stop early for a positive or negative result. Early termination is limited to
 cancellation, policy/resource failure, or rejecting invalid/unstable controls. Such work is

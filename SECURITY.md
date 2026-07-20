@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-MRMA is a research preview. Only the latest patch release receives security fixes.
+MRMA is a research tool. Only the latest patch release receives security fixes.
 
 ## Reporting a vulnerability
 

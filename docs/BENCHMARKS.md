@@ -8,29 +8,18 @@ Content-Type and XML semantics, binary/truncated bodies, comparator/normalizatio
 authorization rejection, budget exhaustion, cancellation, and binary raw input. It never contacts a
 public target.
 
-The result schema is `mrma.benchmark/v1`; corpus version is
-`expert-loopback-corpus/1.0`. Output includes each expected/actual conclusion, request cost, runtime,
+The result schema is `mrma.benchmark/v2`; corpus version is
+`trust-influence-loopback/2.0`. Output includes each expected/actual conclusion, request cost, runtime,
 false positive/negative counts, inconclusive count, peak traced memory, and platform/runtime.
 
-## v0.4.0 release baseline
-
-Generated on Windows AMD64 with CPython 3.12.13:
-
-| Metric | Result |
-|---|---:|
-| Cases | 22/22 passed |
-| False positives | 0 |
-| False negatives | 0 |
-| Intentional inconclusives | 11 |
-| Authorized attempts | 942 |
-| Runtime | 59.075 s |
-| Peak traced memory | 4,047,036 bytes |
+## Release baseline
 
 The exact machine-readable baseline is packaged at
 `mrma/benchmarks/release-baseline.json`, validated against
-`mrma/schemas/benchmark-v1.schema.json`, and included in default expert-review bundles. Performance
+`mrma/schemas/benchmark-v2.schema.json`, and included in default evidence bundles. Performance
 is descriptive, not a cross-platform threshold. Correct expected/actual conclusions and zero false
-results are the release gate.
+results are the release gate. Counts describe this synthetic corpus only and are not estimates for
+deployed HTTP systems.
 
 ## Reproduce
 

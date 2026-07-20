@@ -20,7 +20,7 @@ from mrma.core.sender import SendPolicy
 from mrma.engine import ExperimentOracle, ExperimentPlan
 from mrma.engine.oracle import _redirect_request
 from mrma.evidence import EvidenceJournal, validate_result_document
-from mrma.evidence.models import build_experiment_v7
+from mrma.evidence.models import build_experiment_v8
 from mrma.policy.authorization import ManifestAuthorizationPolicy, load_authorization_manifest
 from mrma.policy.budget import BudgetLedger, BudgetLimits
 from mrma.policy.comparison import ComparisonPolicy
@@ -105,9 +105,9 @@ def plan(
     )
 
 
-def v7_document(oracle, journal, experiment_plan, result):
+def v8_document(oracle, journal, experiment_plan, result):
     journal.close()
-    return build_experiment_v7(
+    return build_experiment_v8(
         result,
         plan=experiment_plan,
         authorization=oracle.authorization,
@@ -166,6 +166,37 @@ def test_oracle_manually_authorizes_and_charges_every_redirect(
     assert event_types[-1] == "RUN_COMPLETED"
 
 
+def test_isolated_observation_preserves_redirect_cookie_only_inside_chain(
+    authorization_payload,
+    write_authorization,
+    monkeypatch,
+):
+    initial_cookies: list[str | None] = []
+    continuation_cookies: list[str | None] = []
+
+    def handler(incoming: httpx.Request) -> httpx.Response:
+        if incoming.url.path == "/start":
+            initial_cookies.append(incoming.headers.get("cookie"))
+            return httpx.Response(
+                302,
+                headers={"Location": "/continue", "Set-Cookie": "flow=abc; Path=/"},
+            )
+        continuation_cookies.append(incoming.headers.get("cookie"))
+        return httpx.Response(200, headers={"Content-Type": "text/plain"}, content=b"ok")
+
+    oracle, _journal = build_oracle(
+        authorization_payload,
+        write_authorization,
+        monkeypatch,
+        handler,
+    )
+    result = oracle.run(plan())
+
+    assert result.status == "completed"
+    assert initial_cookies and set(initial_cookies) == {None}
+    assert continuation_cookies and set(continuation_cookies) == {"flow=abc"}
+
+
 def test_unauthorized_redirect_stops_before_second_network_attempt(
     authorization_payload,
     write_authorization,
@@ -215,7 +246,7 @@ def test_dry_run_authorizes_without_network_or_budget_consumption(
     assert [event.event_type for event in journal.events].count("ATTEMPT_STARTED") == 0
 
 
-def test_v7_evidence_is_strict_and_schema_valid(
+def test_v8_evidence_is_strict_and_schema_valid(
     authorization_payload,
     write_authorization,
     monkeypatch,
@@ -232,16 +263,25 @@ def test_v7_evidence_is_strict_and_schema_valid(
     )
     experiment_plan = plan(follow_redirects=False)
     result = oracle.run(experiment_plan)
-    document = v7_document(oracle, journal, experiment_plan, result)
-    schema = json.loads(Path("mrma/schemas/experiment-v7.schema.json").read_text())
+    document = v8_document(oracle, journal, experiment_plan, result)
+    schema = json.loads(Path("mrma/schemas/experiment-v8.schema.json").read_text())
     Draft202012Validator.check_schema(schema)
     Draft202012Validator(schema).validate(document)
     assert document["authorization"]["bypass"] is False
     assert document["transport"]["wire_exact"] is False
     assert document["journal"]["event_count"] > 0
+    assert document["privacy"]["fingerprint_policy"]["cross_run_correlation"] == "partial"
+    assert any(
+        item["code"] == "CROSS_RUN_POLICY_LINKABILITY"
+        for item in document["limitations"]
+    )
+
+    invalid = deepcopy(document)
+    invalid["privacy"]["fingerprint_policy"]["cross_run_correlation"] = False
+    assert list(Draft202012Validator(schema).iter_errors(invalid))
 
 
-def test_partial_outcomes_are_valid_v7_evidence(
+def test_partial_outcomes_are_valid_v8_evidence(
     authorization_payload,
     write_authorization,
     monkeypatch,
@@ -277,7 +317,7 @@ def test_partial_outcomes_are_valid_v7_evidence(
             )
         experiment_plan = plan(follow_redirects=False)
         result = oracle.run(experiment_plan, cancellation=cancellation)
-        document = v7_document(oracle, journal, experiment_plan, result)
+        document = v8_document(oracle, journal, experiment_plan, result)
 
         statuses.append(result.status)
         assert result.verdict == "INCONCLUSIVE"
@@ -428,6 +468,37 @@ def test_balanced_plan_summary_uses_two_observations_and_no_redirect_multiplier(
     assert summary.maximum_logical_observations == 12
     assert summary.maximum_attempts_with_redirects == 12
     assert summary.to_dict()["plan_digest"] == summary.plan_digest
+
+
+def test_plan_digest_binds_effective_request_and_decision_policy():
+    base = plan(follow_redirects=False)
+    same_source_mutation = replace(
+        base.mutation,
+        headers=[("Accept", "text/plain"), ("X-Probe", "2")],
+        original_sha256=base.baseline.original_sha256,
+    )
+    request_changed = replace(base, mutation=same_source_mutation)
+    body_base = replace(base, mutation=replace(base.mutation, body=b"a"))
+    body_changed = replace(body_base, mutation=replace(base.mutation, body=b"b"))
+    retry_changed = replace(base, send=replace(base.send, retries=1))
+    comparison_changed = replace(
+        base,
+        experiment=replace(
+            base.experiment,
+            equivalence=replace(base.experiment.equivalence, min_similarity=0.9),
+        ),
+    )
+
+    digest = base.summary(0).plan_digest
+    assert request_changed.summary(0).plan_digest != digest
+    assert body_changed.summary(0).plan_digest != body_base.summary(0).plan_digest
+    assert retry_changed.summary(0).plan_digest != digest
+    assert comparison_changed.summary(0).plan_digest != digest
+    assert base.summary(0, authorization_digest="sha256:" + "1" * 64).plan_digest != digest
+    assert base.summary(
+        0,
+        transport_policy={"adapter": "semantic-http/changed"},
+    ).plan_digest != digest
 
 
 def test_oracle_components_must_share_one_journal(
@@ -654,33 +725,71 @@ def test_redirect_method_and_credential_policy_transformations():
         [
             ("Host", "example.test"),
             ("Authorization", "secret"),
+            ("X-API-Key", "api-secret"),
+            ("X-Client-Secret", "client-secret"),
             ("Content-Type", "text/plain"),
+            ("Content-Encoding", "identity"),
+            ("Content-Digest", "sha-256=:AAAA:"),
             ("Content-Length", "4"),
             ("X-Test", "1"),
         ],
         b"body",
     )
-    redirected, changed, credentials = _redirect_request(
+    redirected, changed, credentials, retained_names, stripped_names = _redirect_request(
         request,
         "https://other.test/final",
         303,
         cross_origin=True,
-        forward_credentials=False,
+        cross_origin_mode="safe-default",
+        cross_origin_allow=(),
     )
     assert redirected.method == "GET"
     assert redirected.body == b""
     assert changed is True
     assert credentials == "stripped"
-    assert [name.lower() for name, _value in redirected.headers] == ["x-test"]
+    assert redirected.headers == []
+    assert retained_names == ()
+    assert set(stripped_names) == {
+        "host",
+        "authorization",
+        "x-api-key",
+        "x-client-secret",
+        "content-type",
+        "content-encoding",
+        "content-digest",
+        "content-length",
+        "x-test",
+    }
 
-    retained, changed, credentials = _redirect_request(
+    retained, changed, credentials, retained_names, stripped_names = _redirect_request(
         request,
         "https://other.test/final",
         307,
         cross_origin=True,
-        forward_credentials=True,
+        cross_origin_mode="explicit",
+        cross_origin_allow=(
+            "authorization",
+            "x-api-key",
+            "x-client-secret",
+            "content-type",
+            "content-encoding",
+            "content-digest",
+            "content-length",
+            "x-test",
+        ),
     )
     assert retained.method == "POST"
     assert retained.body == b"body"
     assert changed is False
     assert credentials == "retained"
+    assert retained_names == (
+        "authorization",
+        "x-api-key",
+        "x-client-secret",
+        "content-type",
+        "content-encoding",
+        "content-digest",
+        "content-length",
+        "x-test",
+    )
+    assert stripped_names == ("host",)
