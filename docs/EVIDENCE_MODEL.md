@@ -23,7 +23,8 @@ plan, and structured limitations.
 Cross-field constraints and verifier checks prevent decisive verdicts with incomplete sampling,
 research authorization bypass, insecure unacknowledged TLS, exact replay claims from semantic
 HTTP, false durable claims, false complete header coverage, and no-influence conclusions after
-comparison failure. Published experiment schemas v2 through v7 are byte-locked by tests.
+comparison failure. Verification recomputes the v2 effective-plan digest from its canonical
+document. Published experiment schemas v2 through v8 are byte-locked by tests.
 
 ## Partial results
 
@@ -49,7 +50,8 @@ An `mrma.evidence-bundle/v1` ZIP has deterministic entry order, timestamps, perm
 serialization. It contains plan, result, authorization summary, journal, schema, runtime, packaged
 release benchmark, replay instructions, and a file-digest manifest. `mrma evidence verify` checks
 the ZIP file set, sizes/digests, schema compatibility, result/journal linkage, observation counts,
-and benchmark schema.
+benchmark schema, effective-plan digest, and equality between the result digest and every journal
+`RUN_PLANNED` event.
 
 The hash chain detects modification but does not authenticate who created an entirely new bundle.
 MRMA does not implement a home-grown signature scheme; organizational trust roots remain deferred.

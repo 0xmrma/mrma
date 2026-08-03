@@ -1,8 +1,8 @@
 {
   "schema_version": "mrma.semantic-mutation-baseline/v1",
-  "catalog_version": "v0.4-critical-policy/2.0",
-  "expected_mutants": 18,
-  "minimum_killed": 18,
+  "catalog_version": "v0.4-critical-policy/3.1",
+  "expected_mutants": 24,
+  "minimum_killed": 24,
   "mutant_ids": [
     "AUTH-EXPIRY-BOUNDARY",
     "AUTH-ALL-DNS-ANSWERS",
@@ -21,6 +21,12 @@
     "REDIRECT-CROSS-ORIGIN-FIELDS",
     "OBSERVATION-SESSION-STATE",
     "PLAN-BODY-IDENTITY",
-    "PARTIAL-COMPLETE-SAMPLING"
+    "PARTIAL-COMPLETE-SAMPLING",
+    "LEGACY-MUTATION-BASELINE",
+    "REDIRECT-FINAL-COOKIE-FIELD",
+    "REDIRECT-CROSS-ORIGIN-STATE-RESET",
+    "PLAN-DIGEST-RECOMPUTE",
+    "JOURNAL-PLAN-BINDING",
+    "VERSIONED-V7-BUILDER"
   ]
 }

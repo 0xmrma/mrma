@@ -77,6 +77,8 @@ consuming repetition or budget.
 ## Evidence APIs
 
 - `build_experiment_v8`: convert an `OracleRunResult` plus provenance into strict evidence.
+- `build_experiment_v7`: emit the frozen v7 contract when the run uses authorization v1; it rejects
+  authorization models that v7 cannot represent.
 - `validate_result_document`: JSON Schema and semantic cross-field verification.
 - `create_evidence_bundle`: deterministic atomic bundle creation from public evidence and journal.
 - `verify_evidence`, `verify_evidence_bundle`, `verify_journal`: offline integrity verification.
@@ -85,5 +87,6 @@ consuming repetition or budget.
 ## Compatibility
 
 The v0.4 SDK surface is typed and strict-mypy clean, but MRMA remains a research tool. Schema
-versions are stronger compatibility contracts than Python object internals. No API accepts an
-authorization bypass, and transport does not accept a bare URL/request.
+versions are stronger compatibility contracts than Python object internals. A versioned builder
+never emits a different schema version. No API accepts an authorization bypass, and transport does
+not accept a bare URL/request.

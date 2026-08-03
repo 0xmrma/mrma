@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import cast
 from urllib.parse import urljoin
@@ -15,6 +16,17 @@ from mrma.core.sender import SendPolicy
 from mrma.transport.semantic_http import estimate_semantic_request_bytes
 
 PLAN_SCHEMA_VERSION = "mrma.plan/v2"
+
+
+def effective_plan_digest(document: Mapping[str, object]) -> str:
+    encoded = json.dumps(
+        document,
+        sort_keys=True,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("ascii")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -239,9 +251,7 @@ class ExperimentPlan:
             comparison_policy=comparison_policy,
             transport_policy=transport_policy,
         )
-        digest = "sha256:" + hashlib.sha256(
-            json.dumps(digest_payload, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        digest = effective_plan_digest(digest_payload)
         return PlanSummary(
             schema_version=PLAN_SCHEMA_VERSION,
             plan_digest=digest,

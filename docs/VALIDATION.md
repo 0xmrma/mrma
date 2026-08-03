@@ -2,7 +2,7 @@
 
 ## Exact claim
 
-MRMA v0.4.1 is an authorization-enforcing, budgeted, recoverable HTTP trust-influence research
+MRMA v0.4.2 is an authorization-enforcing, budgeted, recoverable HTTP trust-influence research
 tool. It uses semantic HTTP replay and fixed-sample differential experiments.
 
 ## Non-claims
@@ -40,8 +40,9 @@ mrma evidence verify run.journal.jsonl --json
 mrma evidence verify run.zip --json
 ```
 
-Bundle verification checks digests, file set, schema, journal chain, result linkage, observation
-count, and packaged benchmark. It does not authenticate the bundle author.
+Bundle verification checks digests, file set, schema, journal chain, result linkage, effective-plan
+digest, `RUN_PLANNED` binding, observation count, and packaged benchmark. It does not authenticate
+the bundle author.
 
 ## Benchmark procedure
 

@@ -2,7 +2,7 @@
 
 ## Product boundary
 
-MRMA v0.4.1 has one confirmatory engine and one shared network policy kernel. The CLI parses input,
+MRMA v0.4.2 has one confirmatory engine and one shared network policy kernel. The CLI parses input,
 selects workflow policy, and renders output. It does not own transport authorization decisions.
 
 ```text
@@ -34,7 +34,8 @@ attempt, commits actual bounded cost, and records completion. It cannot be calle
 `ExperimentOracle` owns retries, redirect traversal, setup/reset hooks, schedules, observations,
 and partial-run conversion. One observation session owns redirect/retry cookie state and its
 fresh-observation client. HTTPX redirect following is always disabled. Every hop becomes a new
-authorization decision and budget lease.
+authorization decision and budget lease. Cross-origin policy is applied again to the final
+HTTPX-built request so eligible cookie-jar state cannot bypass raw-field filtering.
 
 ## Packages
 
@@ -50,9 +51,10 @@ authorization decision and budget lease.
 
 `experiment` calls the oracle directly. Legacy network commands execute inside
 `_legacy_network_scope`, which installs `LegacyAuthorizedDispatcher`; the existing sender API then
-resolves to `ExperimentOracle.send_observation`. Architectural tests reject direct HTTPX use outside
-the approved transport/core compatibility boundary and prove that legacy commands enter policy
-scope.
+resolves to `ExperimentOracle.send_observation`. The dispatcher retains the immutable request loaded
+at workflow entry and validates every outgoing header mutation against it before preparing a
+transport. Architectural tests reject direct HTTPX use outside the approved transport/core
+compatibility boundary and prove that legacy commands enter policy scope.
 
 `impact` is migrated to this policy kernel and emits a candidate manifest, but its ranking remains
 one-pass exploratory analysis. Discovery, isolation, profiles, run, diff, and report are likewise

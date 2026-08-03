@@ -152,6 +152,47 @@ def test_isolated_mode_prevents_cookie_carryover_and_preserves_explicit_cookie(m
     assert observed == [None, None, "baseline=explicit"]
 
 
+def test_final_built_request_suppresses_explicit_and_cookie_jar_fields(monkeypatch):
+    observed: list[tuple[str, str | None]] = []
+
+    def handler(incoming: httpx.Request) -> httpx.Response:
+        observed.append((incoming.url.host, incoming.headers.get("cookie")))
+        if incoming.url.host == "a.example.test":
+            return httpx.Response(
+                200,
+                headers={"set-cookie": "flow=abc; Domain=.example.test; Path=/"},
+            )
+        return httpx.Response(200, content=b"ok")
+
+    with mock_transport(monkeypatch, "isolated", handler) as transport:
+        with transport.observation_session(arm="control", round_index=1):
+            transport.capture(
+                RawRequest("GET", "/seed", "HTTP/1.1", [], b""),
+                "http://a.example.test",
+                "control",
+                max_response_bytes=1024,
+                body_storage="full",
+                round_index=1,
+            )
+            transport.capture(
+                RawRequest(
+                    "GET",
+                    "/final",
+                    "HTTP/1.1",
+                    [("Cookie", "explicit=1")],
+                    b"",
+                ),
+                "http://b.example.test",
+                "control",
+                max_response_bytes=1024,
+                body_storage="full",
+                round_index=1,
+                allow_cookie_field=False,
+            )
+
+    assert observed == [("a.example.test", None), ("b.example.test", None)]
+
+
 def test_shared_and_per_arm_state_modes_have_distinct_cookie_semantics(monkeypatch):
     shared_observed: list[str | None] = []
 

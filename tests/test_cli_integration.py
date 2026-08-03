@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator
 
+from mrma.engine.plan import effective_plan_digest
 from mrma.evidence import (
     EvidenceIntegrityError,
     create_evidence_bundle,
@@ -195,6 +196,37 @@ def test_cli_emits_schema_valid_evidence_and_stable_influence_exit_code(
     _rewrite_bundle(second_bundle, plan_tamper, tamper_plan)
     with pytest.raises(EvidenceIntegrityError, match="PLAN_RESULT_MISMATCH"):
         verify_evidence_bundle(plan_tamper)
+
+    effective_plan_tamper = tmp_path / "effective-plan-tamper.zip"
+
+    def tamper_effective_plan(entries: dict[str, bytes]) -> None:
+        result_document = json.loads(entries["result.json"])
+        result_document["plan"]["effective_plan"]["send"]["retries"] += 1
+        entries["result.json"] = json.dumps(result_document).encode() + b"\n"
+        entries["plan.json"] = json.dumps(result_document["plan"]).encode() + b"\n"
+        _sync_manifest_entry(entries, "result.json")
+        _sync_manifest_entry(entries, "plan.json")
+
+    _rewrite_bundle(second_bundle, effective_plan_tamper, tamper_effective_plan)
+    with pytest.raises(EvidenceIntegrityError, match="PLAN_DIGEST_MISMATCH"):
+        verify_evidence_bundle(effective_plan_tamper)
+
+    journal_plan_tamper = tmp_path / "journal-plan-tamper.zip"
+
+    def rebind_result_plan_only(entries: dict[str, bytes]) -> None:
+        result_document = json.loads(entries["result.json"])
+        result_document["plan"]["effective_plan"]["send"]["retries"] += 1
+        result_document["plan"]["plan_digest"] = effective_plan_digest(
+            result_document["plan"]["effective_plan"]
+        )
+        entries["result.json"] = json.dumps(result_document).encode() + b"\n"
+        entries["plan.json"] = json.dumps(result_document["plan"]).encode() + b"\n"
+        _sync_manifest_entry(entries, "result.json")
+        _sync_manifest_entry(entries, "plan.json")
+
+    _rewrite_bundle(second_bundle, journal_plan_tamper, rebind_result_plan_only)
+    with pytest.raises(EvidenceIntegrityError, match="JOURNAL_PLAN_MISMATCH"):
+        verify_evidence_bundle(journal_plan_tamper)
 
     authorization_tamper = tmp_path / "authorization-tamper.zip"
 

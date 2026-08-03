@@ -75,4 +75,7 @@ and connection scope across all redirects and retries, then isolated mode resets
 the next observation. On cross-origin redirects, safe-default policy retains only `Accept`,
 `Accept-Language`, and `User-Agent`; every other caller-supplied field requires an explicit
 allowlist entry. Method changes to `GET` or `HEAD` remove body framing, representation metadata,
-digests, and configured signature fields.
+digests, and configured signature fields. Before a cross-origin hop is sent, policy is applied to
+the final request produced by HTTPX; eligible domain cookies and explicit `Cookie` fields are
+removed unless the cross-origin allowlist names `cookie` or `*`. A denied boundary also clears
+source-origin response-cookie state before destination state is collected.

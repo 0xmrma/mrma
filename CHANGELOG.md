@@ -3,6 +3,47 @@
 All notable changes are documented here. MRMA follows semantic versioning for the CLI and uses an
 independent version in each machine-readable evidence schema.
 
+## 0.4.2 - 2026-08-03
+
+### Authorization And Redirect Enforcement
+
+- Bound every exploratory network command to the immutable request loaded at workflow entry.
+  Header additions, replacements, removals, and value sizes are validated before any attempt event
+  or network activity.
+- Enforced cross-origin cookie policy against the final HTTPX-built request. Eligible domain
+  cookies from the observation jar and explicit `Cookie` fields are suppressed unless the
+  cross-origin field policy explicitly permits them. Source-origin response state is discarded at
+  a denied boundary, while state issued by the destination remains usable inside its own chain.
+
+### Evidence And Compatibility
+
+- Centralized canonical effective-plan hashing and recompute the digest during standalone result
+  and bundle verification. Bundle verification also binds the result digest to every journal
+  `RUN_PLANNED` event.
+- Restored the published benchmark v1 schema byte-for-byte. Benchmark v2 retains the current
+  terminology and corpus identifier.
+- Corrected `build_experiment_v7()` to emit a schema-valid v7 document for authorization v1 instead
+  of returning v8 under a versioned name.
+- Extended byte and canonical immutability checks to authorization v2, experiment v8, and benchmark
+  v1-v2.
+
+### Project Surface
+
+- Rebuilt the README around the enforced pipeline, result semantics, bundle contents, workflow
+  roles, explicit limitations, and release verification path.
+- Added a repository-native technical banner and synchronized release, architecture,
+  authorization, HTTP, evidence, validation, and roadmap documentation.
+
+### Verification
+
+- Expanded the suite to 303 tests. Local branch coverage is 70% repository-wide, 95.11% across the
+  critical runtime, and 86.84% across the corrected core; every critical module remains above 90%.
+- Expanded the semantic mutation catalog from 18 to 24 invariants. All mutants are killed,
+  including workflow-baseline, final-cookie-field, cross-origin state, plan-digest,
+  journal-binding, and versioned-v7 regressions.
+- Regenerated the 22-case loopback baseline: all expected conclusions pass across 942 authorized
+  attempts.
+
 ## 0.4.1 - 2026-07-20
 
 ### Policy Boundaries

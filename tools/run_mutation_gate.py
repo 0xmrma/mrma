@@ -147,6 +147,58 @@ MUTATIONS = (
         "result.completed_rounds",
         ("tests/test_oracle.py::test_partial_outcomes_are_valid_v8_evidence",),
     ),
+    Mutation(
+        "LEGACY-MUTATION-BASELINE",
+        "mrma/workflows/legacy.py",
+        "self.authorization.validate_mutation(\n            self.baseline,\n            request,",
+        "self.authorization.validate_mutation(\n            request,\n            request,",
+        (
+            "tests/test_legacy_workflow.py::test_legacy_dispatcher_binds_allowed_forbidden_and_oversized_headers",
+        ),
+    ),
+    Mutation(
+        "REDIRECT-FINAL-COOKIE-FIELD",
+        "mrma/core/http_client.py",
+        'if not allow_cookie_field:\n        request.headers.pop("cookie", None)',
+        'if allow_cookie_field:\n        request.headers.pop("cookie", None)',
+        (
+            "tests/test_http_client.py::test_final_built_request_suppresses_explicit_and_cookie_jar_fields",
+        ),
+    ),
+    Mutation(
+        "REDIRECT-CROSS-ORIGIN-STATE-RESET",
+        "mrma/engine/oracle.py",
+        "if cross_origin and not allow_cross_origin_cookie:\n"
+        "                self.transport.clear_observation_cookies()",
+        "if False:\n"
+        "                self.transport.clear_observation_cookies()",
+        (
+            "tests/test_oracle.py::test_cross_origin_redirect_suppresses_domain_cookie_after_request_build",
+        ),
+    ),
+    Mutation(
+        "PLAN-DIGEST-RECOMPUTE",
+        "mrma/evidence/bundle.py",
+        'if plan["plan_digest"] != effective_plan_digest(effective_plan):',
+        "if False:",
+        ("tests/test_oracle.py::test_result_verifier_recomputes_effective_plan_digest",),
+    ),
+    Mutation(
+        "JOURNAL-PLAN-BINDING",
+        "mrma/evidence/bundle.py",
+        "if not planned or any(value != expected for value in planned):",
+        "if not planned and any(value != expected for value in planned):",
+        (
+            "tests/test_cli_integration.py::test_cli_emits_schema_valid_evidence_and_stable_influence_exit_code",
+        ),
+    ),
+    Mutation(
+        "VERSIONED-V7-BUILDER",
+        "mrma/evidence/models.py",
+        'document["schema_version"] = "mrma.experiment/v7"',
+        'document["schema_version"] = "mrma.experiment/v8"',
+        ("tests/test_oracle.py::test_versioned_v7_builder_emits_schema_valid_v7",),
+    ),
 )
 
 

@@ -35,7 +35,16 @@ require explicit authorization and repetition limits.
 
 Redirect destinations repeat the sequence. Cross-origin hops retain only `Accept`,
 `Accept-Language`, and `User-Agent` by default. Additional fields require an explicit v2 allowlist.
-When redirect semantics change a method to `GET`, body and content/signature metadata are removed.
+The policy is enforced against the final HTTPX-built request, so domain cookies from the active
+observation jar and explicit `Cookie` fields are suppressed unless `cookie` or `*` is explicitly
+allowed. At a denied cross-origin boundary, source-origin response-cookie state is discarded before
+the destination request; cookies newly issued by that destination remain available to its
+same-origin continuation. When redirect semantics change a method to `GET`, body and
+content/signature metadata are removed.
+
+Legacy exploratory workflows preserve the request loaded at workflow entry as their mutation
+baseline. Every outgoing addition, replacement, removal, and value size is checked against the v2
+header mutation policy before an attempt is journaled or sent.
 
 ## Hooks and state-changing methods
 

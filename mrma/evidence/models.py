@@ -452,6 +452,59 @@ def build_experiment_v8(
     }
 
 
-def build_experiment_v7(*args: object, **kwargs: object) -> dict[str, object]:
-    """Compatibility alias for callers migrating to the current evidence builder."""
-    return build_experiment_v8(*args, **kwargs)  # type: ignore[arg-type]
+def build_experiment_v7(
+    result: OracleRunResult,
+    *,
+    plan: ExperimentPlan,
+    authorization: ManifestAuthorizationPolicy,
+    budgets: BudgetLedger,
+    journal: EvidenceJournal,
+    run_id: str,
+    started_at: str,
+    completed_at: str,
+    duration_ms: float,
+    transport_configuration: dict[str, object],
+    source_commit: str | None = None,
+    package_digest: str | None = None,
+    container_image_digest: str | None = None,
+    insecure_exception: bool = False,
+) -> dict[str, object]:
+    """Build the frozen v7 contract when its v1 authorization model is representable."""
+    if authorization.manifest.schema_version != "mrma.authorization/v1":
+        raise ValueError("mrma.experiment/v7 can only represent mrma.authorization/v1")
+    document = build_experiment_v8(
+        result,
+        plan=plan,
+        authorization=authorization,
+        budgets=budgets,
+        journal=journal,
+        run_id=run_id,
+        started_at=started_at,
+        completed_at=completed_at,
+        duration_ms=duration_ms,
+        transport_configuration=transport_configuration,
+        source_commit=source_commit,
+        package_digest=package_digest,
+        container_image_digest=container_image_digest,
+        insecure_exception=insecure_exception,
+    )
+    document["schema_version"] = "mrma.experiment/v7"
+    authorization_document = cast(dict[str, object], document["authorization"])
+    for field_name in (
+        "authority_mode",
+        "host_mutation_authorized",
+        "cross_origin_header_mode",
+        "query_policy_version",
+        "mutation_policy_version",
+    ):
+        authorization_document.pop(field_name, None)
+    plan_document = cast(dict[str, object], document["plan"])
+    plan_document["schema_version"] = "mrma.plan/v1"
+    plan_document.pop("effective_plan", None)
+    analysis = result.experiment
+    document["privacy"] = {
+        "policy": analysis.config.redactor.policy,
+        "fingerprints": "per-run keyed HMAC-SHA256",
+        "cross_run_correlation": False,
+    }
+    return document

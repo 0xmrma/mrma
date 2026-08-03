@@ -702,6 +702,7 @@ class ExperimentOracle:
         role = initial_role or ("mutation" if arm == "mutation" else "control")
         current = request
         current_base = plan.base_url
+        allow_cookie_field = True
         redirect_chain: list[RedirectHop] = []
         all_attempts: list[AttemptRecord] = []
         redirect_depth = 0
@@ -715,6 +716,7 @@ class ExperimentOracle:
                 round_index=round_index,
                 sequence=sequence,
                 redirect_depth=redirect_depth,
+                allow_cookie_field=allow_cookie_field,
             )
             offset = len(all_attempts)
             all_attempts.extend(
@@ -808,8 +810,18 @@ class ExperimentOracle:
                     resolved_target=target_url,
                 )
             )
+            allow_cross_origin_cookie = (
+                redirect_policy.cross_origin_headers.mode == "explicit"
+                and (
+                    "*" in redirect_policy.cross_origin_headers.allow
+                    or "cookie" in redirect_policy.cross_origin_headers.allow
+                )
+            )
+            if cross_origin and not allow_cross_origin_cookie:
+                self.transport.clear_observation_cookies()
             current = next_request
             current_base = target_url
+            allow_cookie_field = not cross_origin or allow_cross_origin_cookie
             redirect_depth += 1
 
     def _reject_redirect(self, code: str) -> NoReturn:
@@ -827,6 +839,7 @@ class ExperimentOracle:
         round_index: int,
         sequence: int,
         redirect_depth: int,
+        allow_cookie_field: bool = True,
     ) -> SendOutcome:
         trace: list[AttemptRecord] = []
         retry_statuses = set(plan.send.retry_status)
@@ -846,6 +859,7 @@ class ExperimentOracle:
                     round_index=round_index,
                     sequence=sequence,
                     redirect_depth=redirect_depth,
+                    allow_cookie_field=allow_cookie_field,
                 )
             except Exception as exc:
                 if getattr(exc, "mrma_fatal_policy_error", False):
@@ -897,6 +911,7 @@ class ExperimentOracle:
         round_index: int,
         sequence: int,
         redirect_depth: int,
+        allow_cookie_field: bool = True,
     ) -> CapturedResponse:
         self._attempt_sequence += 1
         attempt_id = f"a{self._attempt_sequence:06d}-{uuid.uuid4().hex[:12]}"
@@ -1018,6 +1033,7 @@ class ExperimentOracle:
                 arm="mutation" if arm == "mutation" else "control",
                 round_index=round_index,
                 body_storage=plan.experiment.body_storage,
+                allow_cookie_field=allow_cookie_field,
             )
         finally:
             if lease.active:

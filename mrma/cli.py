@@ -255,6 +255,7 @@ def _load_authorization_policy(path: str) -> ManifestAuthorizationPolicy:
 def _legacy_network_scope(args: argparse.Namespace) -> Iterator[None]:
     run_id = uuid4().hex
     policy = _load_authorization_policy(args.authorization)
+    _, workflow_baseline = _load_request(args)
     try:
         limits = BudgetLimits.from_mapping(policy.manifest.budget)
         journal = EvidenceJournal(
@@ -268,6 +269,7 @@ def _legacy_network_scope(args: argparse.Namespace) -> Iterator[None]:
     ledger = BudgetLedger(limits, journal)
     redactor = EvidenceRedactor(policy="standard")
     dispatcher = LegacyAuthorizedDispatcher(
+        baseline=workflow_baseline,
         authorization=policy,
         budgets=ledger,
         evidence=journal,

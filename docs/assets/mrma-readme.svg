@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" role="img" aria-labelledby="title description">
+  <title id="title">MRMA</title>
+  <desc id="description">HTTP trust-influence experiments with enforced authorization, budgets, and verifiable evidence.</desc>
+  <rect width="1200" height="300" rx="6" fill="#0b1017"/>
+  <rect x="1" y="1" width="1198" height="298" rx="5" fill="none" stroke="#243242" stroke-width="2"/>
+
+  <g transform="translate(68 50)">
+    <rect x="0" y="0" width="250" height="200" rx="6" fill="#101923" stroke="#2b3c4f" stroke-width="2"/>
+    <line x1="125" y1="18" x2="125" y2="182" stroke="#ef4565" stroke-width="3" stroke-dasharray="7 7"/>
+    <text x="125" y="12" fill="#ef4565" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="11" text-anchor="middle">TRUST BOUNDARY</text>
+
+    <rect x="22" y="39" width="78" height="30" rx="4" fill="#162433" stroke="#4cc9f0"/>
+    <text x="61" y="59" fill="#d9f5ff" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="12" text-anchor="middle">CONTROL</text>
+    <rect x="22" y="88" width="78" height="30" rx="4" fill="#162433" stroke="#f6c85f"/>
+    <text x="61" y="108" fill="#fff2c7" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="12" text-anchor="middle">MUTATION</text>
+
+    <line x1="100" y1="54" x2="151" y2="54" stroke="#4cc9f0" stroke-width="2"/>
+    <line x1="100" y1="103" x2="151" y2="103" stroke="#f6c85f" stroke-width="2"/>
+    <path d="M143 49 L151 54 L143 59" fill="none" stroke="#4cc9f0" stroke-width="2"/>
+    <path d="M143 98 L151 103 L143 108" fill="none" stroke="#f6c85f" stroke-width="2"/>
+
+    <rect x="151" y="39" width="77" height="79" rx="4" fill="#151f2a" stroke="#7c8da1"/>
+    <text x="189.5" y="68" fill="#f2f6fa" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="12" text-anchor="middle">HTTP</text>
+    <text x="189.5" y="86" fill="#9eb0c4" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="10" text-anchor="middle">OUTCOME</text>
+    <text x="189.5" y="102" fill="#9eb0c4" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="10" text-anchor="middle">EVIDENCE</text>
+
+    <line x1="61" y1="132" x2="61" y2="156" stroke="#52677d"/>
+    <line x1="61" y1="156" x2="190" y2="156" stroke="#52677d"/>
+    <line x1="190" y1="132" x2="190" y2="156" stroke="#52677d"/>
+    <rect x="68" y="143" width="115" height="28" rx="4" fill="#10251e" stroke="#35c48d"/>
+    <text x="125.5" y="162" fill="#b8f3dc" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="11" text-anchor="middle">REPRODUCIBLE?</text>
+  </g>
+
+  <g transform="translate(377 62)">
+    <text x="0" y="75" fill="#f5f7fa" font-family="Arial, Helvetica, sans-serif" font-size="82" font-weight="700" letter-spacing="0">MRMA</text>
+    <text x="4" y="110" fill="#4cc9f0" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="18">HTTP TRUST-INFLUENCE ANALYZER</text>
+    <text x="4" y="148" fill="#aebdcd" font-family="Arial, Helvetica, sans-serif" font-size="18">Controlled request mutations. Stable controls. Verifiable evidence.</text>
+
+    <g transform="translate(4 174)" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="11">
+      <rect x="0" y="0" width="128" height="28" rx="4" fill="#132333" stroke="#31506c"/>
+      <text x="64" y="18" fill="#ccecff" text-anchor="middle">AUTHORIZATION</text>
+      <rect x="139" y="0" width="92" height="28" rx="4" fill="#132333" stroke="#31506c"/>
+      <text x="185" y="18" fill="#ccecff" text-anchor="middle">BUDGETS</text>
+      <rect x="242" y="0" width="92" height="28" rx="4" fill="#132333" stroke="#31506c"/>
+      <text x="288" y="18" fill="#ccecff" text-anchor="middle">JOURNAL</text>
+      <rect x="345" y="0" width="92" height="28" rx="4" fill="#132333" stroke="#31506c"/>
+      <text x="391" y="18" fill="#ccecff" text-anchor="middle">ORACLE</text>
+    </g>
+  </g>
+</svg>
