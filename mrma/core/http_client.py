@@ -218,6 +218,13 @@ class SemanticHttpTransport:
         if client is not None:
             client.close()
 
+    def clear_observation_cookies(self) -> None:
+        """Discard response-derived cookie state inside the active observation."""
+        if self._active_observation is None:
+            raise RuntimeError("cookie state can only be cleared during an observation")
+        client, _, _, _ = self._active_observation
+        client.cookies.clear()
+
     def _before_observation(self, client: httpx.Client, arm: str) -> None:
         client.cookies.clear()
         if self.state_mode != "isolated":
@@ -272,6 +279,7 @@ class SemanticHttpTransport:
         max_response_bytes: int,
         body_storage: str,
         round_index: int | None = None,
+        allow_cookie_field: bool = True,
     ) -> CapturedResponse:
         """Stream and bound one experiment response without retaining an unbounded body."""
         if max_response_bytes <= 0:
@@ -287,7 +295,12 @@ class SemanticHttpTransport:
             client, close_after, active_arm, active_round = active
             if arm != active_arm or round_index != active_round:
                 raise RuntimeError("capture does not belong to the active observation")
-        request = _build_request(client, req, base_url)
+        request = _build_request(
+            client,
+            req,
+            base_url,
+            allow_cookie_field=allow_cookie_field,
+        )
         response: httpx.Response | None = None
         try:
             response = client.send(request, stream=True)
@@ -315,14 +328,23 @@ def _request_parts(req: RawRequest, base_url: str) -> tuple[str, list[tuple[str,
     return url, headers
 
 
-def _build_request(client: httpx.Client, req: RawRequest, base_url: str) -> httpx.Request:
+def _build_request(
+    client: httpx.Client,
+    req: RawRequest,
+    base_url: str,
+    *,
+    allow_cookie_field: bool = True,
+) -> httpx.Request:
     url, headers = _request_parts(req, base_url)
-    return client.build_request(
+    request = client.build_request(
         method=req.method,
         url=url,
         headers=headers,
         content=req.body if req.body else None,
     )
+    if not allow_cookie_field:
+        request.headers.pop("cookie", None)
+    return request
 
 
 def _send(client: httpx.Client, req: RawRequest, base_url: str) -> httpx.Response:

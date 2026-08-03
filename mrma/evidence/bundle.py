@@ -12,6 +12,7 @@ from typing import cast
 from jsonschema import Draft202012Validator
 
 from mrma import __version__
+from mrma.engine.plan import effective_plan_digest
 
 from .journal import EvidenceIntegrityError, verify_journal, verify_journal_bytes
 
@@ -141,6 +142,13 @@ def validate_result_document(document: dict[str, object]) -> dict[str, object]:
     consumed = _as_object(budget["consumed"], label="budget.consumed")
     transport = _as_object(document["transport"], label="transport")
     plan = _as_object(document["plan"], label="plan")
+    if schema_version == "mrma.experiment/v8":
+        effective_plan = _as_object(plan["effective_plan"], label="plan.effective_plan")
+        if plan["plan_digest"] != effective_plan_digest(effective_plan):
+            raise EvidenceIntegrityError(
+                "PLAN_DIGEST_MISMATCH",
+                "effective_plan does not match plan_digest",
+            )
     if run["verdict"] != analysis["verdict"] or run["stop_reason"] != analysis["stop_reason"]:
         raise EvidenceIntegrityError(
             "EVIDENCE_CROSS_FIELD_INVALID", "run and analysis conclusions differ"
@@ -199,6 +207,8 @@ def create_evidence_bundle(
     result_tool = _as_object(result["tool"], label="tool")
     journal_bytes = Path(journal_path).read_bytes()
     journal_verification = verify_journal_bytes(journal_bytes)
+    result_plan = _as_object(result["plan"], label="plan")
+    _verify_journal_plan_digest(journal_bytes, result_plan["plan_digest"])
     if result_journal["head_digest"] != journal_verification["head_digest"]:
         raise EvidenceIntegrityError(
             "JOURNAL_RESULT_MISMATCH", "result and journal head digests differ"
@@ -293,6 +303,21 @@ def _journal_observation_count(data: bytes) -> int:
     )
 
 
+def _verify_journal_plan_digest(data: bytes, expected: object) -> None:
+    planned: list[object] = []
+    for line in data.splitlines():
+        event = _load_json(line, label="journal event")
+        if event.get("event_type") != "RUN_PLANNED":
+            continue
+        event_data = _as_object(event.get("data"), label="journal event data")
+        planned.append(event_data.get("plan_digest"))
+    if not planned or any(value != expected for value in planned):
+        raise EvidenceIntegrityError(
+            "JOURNAL_PLAN_MISMATCH",
+            "RUN_PLANNED does not match the result plan digest",
+        )
+
+
 def verify_evidence_bundle(path: str | Path) -> dict[str, object]:
     with zipfile.ZipFile(path, "r") as archive:
         members = _safe_members(archive)
@@ -328,6 +353,8 @@ def verify_evidence_bundle(path: str | Path) -> dict[str, object]:
             )
         journal_data = archive.read(members["journal.jsonl"])
         journal = verify_journal_bytes(journal_data)
+        result_plan = _as_object(result["plan"], label="plan")
+        _verify_journal_plan_digest(journal_data, result_plan["plan_digest"])
         if result_journal["head_digest"] != journal["head_digest"]:
             raise EvidenceIntegrityError("JOURNAL_RESULT_MISMATCH", "head digest differs")
         if result_journal["event_count"] != journal["event_count"]:

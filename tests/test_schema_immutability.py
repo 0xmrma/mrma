@@ -4,6 +4,8 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 EXPECTED = {
     2: (
         "305bf1192b70b249683d4f11db074f2ec0fd89164283010875c96b65fa2a552e",
@@ -62,3 +64,45 @@ def test_authorization_v1_is_byte_and_semantically_immutable():
     assert hashlib.sha256(canonical).hexdigest() == (
         "d1fae6b6d22f3ec6d708359f398c3550b07e3d5155f2e62bf889437453c3a8c1"
     )
+
+
+@pytest.mark.parametrize(
+    ("path", "raw_expected", "canonical_expected"),
+    [
+        (
+            "mrma/schemas/benchmark-v1.schema.json",
+            "c45f4a0d0acddf10f4b53767bd7c6188772d06feea6cfeb347d4bf210a395c95",
+            "ec4cf2c56d9007003c1fd6ee23691dc823d0e9198c4f3f97f9848cf7ae815c5c",
+        ),
+        (
+            "mrma/schemas/benchmark-v2.schema.json",
+            "014f7c0b7e3490b6ff44cbb6f256af659ae445e3cb7d9a3ebb1618d7bbb8df9c",
+            "359ffd90270ac1361be2fc08bb1d0ea962325f9f94822d2a8f78d81f8ea88f61",
+        ),
+        (
+            "mrma/schemas/authorization-v2.schema.json",
+            "4ef879a31ea5a092aa998da3e722a6c12f26db3151e77048b09158ad1987aa04",
+            "c28c21d084f3eff4f9d95279fd16281dfeb5bb4316d9842c4073deffa3902e22",
+        ),
+        (
+            "mrma/schemas/experiment-v8.schema.json",
+            "f4fd01242049d77e63256c9f21ac88eb6f81366146f22ba118a0186b6fb40c5b",
+            "b06a1ea651142b0428f03be60c7e3dfa4e50e965a5e0f7c4e4ee52b1eaf1268f",
+        ),
+    ],
+)
+def test_v041_public_schemas_are_byte_and_semantically_immutable(
+    path: str,
+    raw_expected: str,
+    canonical_expected: str,
+):
+    raw = Path(path).read_bytes()
+    repository_bytes = raw.replace(b"\r\n", b"\n")
+    canonical = json.dumps(
+        json.loads(raw),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+
+    assert hashlib.sha256(repository_bytes).hexdigest() == raw_expected
+    assert hashlib.sha256(canonical).hexdigest() == canonical_expected

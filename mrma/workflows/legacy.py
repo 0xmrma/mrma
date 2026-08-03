@@ -35,11 +35,13 @@ class LegacyAuthorizedDispatcher:
     def __init__(
         self,
         *,
+        baseline: RawRequest,
         authorization: ManifestAuthorizationPolicy,
         budgets: BudgetLedger,
         evidence: EvidenceJournal,
         redactor: EvidenceRedactor,
     ) -> None:
+        self.baseline = baseline
         self.authorization = authorization
         self.budgets = budgets
         self.evidence = evidence
@@ -84,6 +86,11 @@ class LegacyAuthorizedDispatcher:
         return self._oracle
 
     def __call__(self, request: RawRequest, base_url: str, options: SendOptions) -> object:
+        self.authorization.validate_mutation(
+            self.baseline,
+            request,
+            mutation_family="header",
+        )
         oracle = self._prepare(options)
         self._sequence += 1
         risk = classify_method(request.method).risk_class

@@ -80,6 +80,11 @@ class SemanticHttpAdapter:
     def complete_round(self, round_index: int) -> None:
         self._transport.complete_round(round_index)
 
+    def clear_observation_cookies(self) -> None:
+        if not self._entered:
+            raise TransportPolicyError("TRANSPORT_NOT_ENTERED", "adapter context is not active")
+        self._transport.clear_observation_cookies()
+
     @contextmanager
     def observation_session(
         self,
@@ -118,6 +123,7 @@ class SemanticHttpAdapter:
         arm: str,
         round_index: int | None,
         body_storage: str,
+        allow_cookie_field: bool = True,
     ) -> CapturedResponse:
         if not self._entered:
             raise TransportPolicyError("TRANSPORT_NOT_ENTERED", "adapter context is not active")
@@ -166,6 +172,9 @@ class SemanticHttpAdapter:
                 "method": authorization.decision.method,
                 "transport_adapter": TRANSPORT_ADAPTER_VERSION,
                 "redirects_followed_by_adapter": False,
+                "state_field_forwarding": (
+                    "allowed" if allow_cookie_field else "suppressed"
+                ),
             },
         )
         started = time.perf_counter()
@@ -178,6 +187,7 @@ class SemanticHttpAdapter:
                 max_response_bytes=lease.response_allowance,
                 body_storage=body_storage,
                 round_index=round_index,
+                allow_cookie_field=allow_cookie_field,
             )
         except Exception as exc:
             elapsed_ms = int((time.perf_counter() - started) * 1000)

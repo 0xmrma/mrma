@@ -4,6 +4,7 @@ import json
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import replace
+from importlib.resources import files
 from pathlib import Path
 from threading import Event
 from uuid import uuid4
@@ -19,8 +20,8 @@ from mrma.core.raw_request import RawRequest
 from mrma.core.sender import SendPolicy
 from mrma.engine import ExperimentOracle, ExperimentPlan
 from mrma.engine.oracle import _redirect_request
-from mrma.evidence import EvidenceJournal, validate_result_document
-from mrma.evidence.models import build_experiment_v8
+from mrma.evidence import EvidenceIntegrityError, EvidenceJournal, validate_result_document
+from mrma.evidence.models import build_experiment_v7, build_experiment_v8
 from mrma.policy.authorization import ManifestAuthorizationPolicy, load_authorization_manifest
 from mrma.policy.budget import BudgetLedger, BudgetLimits
 from mrma.policy.comparison import ComparisonPolicy
@@ -195,6 +196,60 @@ def test_isolated_observation_preserves_redirect_cookie_only_inside_chain(
     assert result.status == "completed"
     assert initial_cookies and set(initial_cookies) == {None}
     assert continuation_cookies and set(continuation_cookies) == {"flow=abc"}
+
+
+def test_cross_origin_redirect_suppresses_domain_cookie_after_request_build(
+    authorization_payload,
+    write_authorization,
+    monkeypatch,
+):
+    payload = deepcopy(authorization_payload)
+    payload["rules"][0]["hosts"] = ["a.example.test", "b.example.test"]
+    destination_cookies: list[tuple[str, str | None]] = []
+
+    def handler(incoming: httpx.Request) -> httpx.Response:
+        if incoming.url.host == "a.example.test":
+            return httpx.Response(
+                302,
+                headers={
+                    "Location": "http://b.example.test/final",
+                    "Set-Cookie": "flow=abc; Domain=.example.test; Path=/",
+                },
+            )
+        destination_cookies.append((incoming.url.path, incoming.headers.get("cookie")))
+        if incoming.url.path == "/final":
+            return httpx.Response(
+                302,
+                headers={
+                    "Location": "/done",
+                    "Set-Cookie": "destination=1; Path=/",
+                },
+            )
+        return httpx.Response(200, headers={"Content-Type": "text/plain"}, content=b"ok")
+
+    oracle, journal = build_oracle(payload, write_authorization, monkeypatch, handler)
+    experiment_plan = replace(plan(), base_url="http://a.example.test")
+    result = oracle.run(experiment_plan)
+
+    assert result.status == "completed"
+    assert destination_cookies
+    assert len(destination_cookies) % 2 == 0
+    assert all(
+        pair == (("/final", None), ("/done", "destination=1"))
+        for pair in zip(destination_cookies[::2], destination_cookies[1::2], strict=True)
+    )
+    redirect_attempts = [
+        event
+        for event in journal.events
+        if event.event_type == "ATTEMPT_STARTED" and event.data["role"] == "redirect"
+    ]
+    assert redirect_attempts
+    forwarding = [event.data["state_field_forwarding"] for event in redirect_attempts]
+    assert len(forwarding) % 2 == 0
+    assert all(
+        pair == ("suppressed", "allowed")
+        for pair in zip(forwarding[::2], forwarding[1::2], strict=True)
+    )
 
 
 def test_unauthorized_redirect_stops_before_second_network_attempt(
@@ -499,6 +554,70 @@ def test_plan_digest_binds_effective_request_and_decision_policy():
         0,
         transport_policy={"adapter": "semantic-http/changed"},
     ).plan_digest != digest
+
+
+def test_result_verifier_recomputes_effective_plan_digest(
+    authorization_payload,
+    write_authorization,
+    monkeypatch,
+):
+    oracle, journal = build_oracle(
+        authorization_payload,
+        write_authorization,
+        monkeypatch,
+        lambda _request: httpx.Response(200, content=b"ok"),
+    )
+    experiment_plan = plan(follow_redirects=False)
+    result = oracle.run(experiment_plan)
+    document = v8_document(oracle, journal, experiment_plan, result)
+    document["plan"]["effective_plan"]["send"]["retries"] = 99
+
+    with pytest.raises(EvidenceIntegrityError, match="PLAN_DIGEST_MISMATCH"):
+        validate_result_document(document)
+
+
+def test_versioned_v7_builder_emits_schema_valid_v7(
+    authorization_payload,
+    write_authorization,
+    monkeypatch,
+):
+    oracle, journal = build_oracle(
+        authorization_payload,
+        write_authorization,
+        monkeypatch,
+        lambda _request: httpx.Response(200, content=b"ok"),
+    )
+    experiment_plan = plan(follow_redirects=False)
+    result = oracle.run(experiment_plan)
+    journal.close()
+    document = build_experiment_v7(
+        result,
+        plan=experiment_plan,
+        authorization=oracle.authorization,
+        budgets=oracle.budgets,
+        journal=journal,
+        run_id=uuid4().hex,
+        started_at="2026-07-15T12:00:00+00:00",
+        completed_at="2026-07-15T12:01:00+00:00",
+        duration_ms=60000,
+        transport_configuration={
+            "trust_environment": False,
+            "tls": {"verification": "system", "ca_fingerprint": None},
+            "proxy": {
+                "mode": "none",
+                "source": "none",
+                "endpoint_fingerprint": None,
+            },
+        },
+    )
+    schema = json.loads(
+        files("mrma.schemas").joinpath("experiment-v7.schema.json").read_text(encoding="utf-8")
+    )
+
+    Draft202012Validator(schema).validate(document)
+    assert document["schema_version"] == "mrma.experiment/v7"
+    assert document["plan"]["schema_version"] == "mrma.plan/v1"
+    assert "effective_plan" not in document["plan"]
 
 
 def test_oracle_components_must_share_one_journal(

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://0xmrma.github.io/mrma/schemas/benchmark-v1.schema.json",
-  "title": "MRMA loopback benchmark result v1",
+  "title": "MRMA expert benchmark result v1",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -21,7 +21,7 @@
   ],
   "properties": {
     "schema_version": { "const": "mrma.benchmark/v1" },
-    "corpus_version": { "type": "string", "pattern": "^[a-z][a-z0-9-]*/1\\.0$" },
+    "corpus_version": { "const": "expert-loopback-corpus/1.0" },
     "mrma_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$" },
     "passed": { "type": "boolean" },
     "case_count": { "type": "integer", "minimum": 1 },

@@ -1,13 +1,13 @@
-# MRMA v0.4.1 release checklist
+# MRMA v0.4.2 release checklist
 
 ## Correctness and security
 
 - [ ] Every network command is covered by the architectural policy-boundary test.
 - [ ] Authorization, budget, redirect, retry, hook, journal, privacy, and partial-result adversarial tests pass.
 - [ ] `mrma.experiment/v8`, authorization v2, benchmark v2, and all negative fixtures validate.
-- [ ] Experiment schemas v2-v7 and authorization v1 match immutable SHA-256 fixtures.
+- [ ] Experiment schemas v2-v8, authorization v1-v2, and benchmark v1-v2 match immutable SHA-256 fixtures.
 - [ ] The 22-case loopback benchmark passes with zero false positives/negatives.
-- [ ] Critical semantic mutation gate kills all 18 committed mutants.
+- [ ] Critical semantic mutation gate kills all 24 committed mutants.
 - [ ] No unresolved P0/P1 correctness, authorization, evidence, or secret-exposure issue remains.
 
 ## Quality gates
@@ -24,7 +24,7 @@
 
 ## Distribution and container
 
-- [ ] Version is `0.4.1` in package metadata, import, CLI, wheel, and container.
+- [ ] Version is `0.4.2` in package metadata, import, CLI, wheel, and container.
 - [ ] Wheel and sdist build from a clean tree and pass `twine check`.
 - [ ] Clean wheel install passes `pip check` outside the source tree.
 - [ ] Clean wheel contains experiment v2-v8, authorization v1-v2, benchmark v1-v2, and release baseline.

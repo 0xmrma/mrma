@@ -94,7 +94,19 @@ adding more mutation families.
 - [x] Preserve experiment schemas v2 through v7 byte-for-byte
 - [x] Publish honest whole-repository and critical-runtime branch coverage plus a semantic mutation gate
 
-## 0.5 - Product-wide evidence oracle
+## 0.4.2 - Frozen correctness baseline
+
+- [x] Bind every legacy exploratory mutation to its immutable workflow baseline
+- [x] Enforce cross-origin cookie policy against the final HTTPX-built request
+- [x] Recompute effective-plan digests during result and bundle verification
+- [x] Bind bundle results to journal `RUN_PLANNED` digests
+- [x] Restore benchmark v1 byte-for-byte and lock every schema published through v0.4.1
+- [x] Make the versioned v7 Python builder emit only schema-valid v7 evidence
+
+Version 0.4.2 is the maintained 0.4 baseline. The items below are optional research directions,
+not commitments or current product claims.
+
+## Possible 0.5 - Product-wide evidence oracle
 
 - Integrate repeated controls into impact, profiles, discovery, and isolation
 - Replace first-sample baselines with robust baseline distributions
