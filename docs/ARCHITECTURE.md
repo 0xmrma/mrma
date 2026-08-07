@@ -2,7 +2,7 @@
 
 ## Product boundary
 
-MRMA v0.4.2 has one confirmatory engine and one shared network policy kernel. The CLI parses input,
+MRMA v0.4.3 has one confirmatory engine and one shared network policy kernel. The CLI parses input,
 selects workflow policy, and renders output. It does not own transport authorization decisions.
 
 ```text

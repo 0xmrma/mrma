@@ -11,24 +11,31 @@ wall-clock admission deadline, timeout, concurrency, redirect depth, and mutatio
 
 For each network attempt MRMA:
 
-1. computes a conservative proposed cost;
-2. checks per-attempt and aggregate policy;
-3. atomically reserves counters, bytes, timeout, and concurrency;
-4. records `BUDGET_RESERVED`;
-5. sends one attempt;
-6. commits bounded actual bytes and elapsed duration, or releases the lease;
-7. records `BUDGET_UPDATED`.
+1. authorizes the immutable request and any declared mutation delta;
+2. asks HTTPX to build the final request, including cookie-jar and generated fields;
+3. measures that prepared representation and checks effective method, target, and `Host` again;
+4. atomically reserves counters, bytes, timeout, and concurrency;
+5. revalidates authorization and records `BUDGET_RESERVED` plus `ATTEMPT_STARTED`;
+6. sends the exact prepared request object once;
+7. commits bounded actual bytes and elapsed duration, or releases the lease;
+8. records `BUDGET_UPDATED`.
 
 No reservation is created when a check fails. A lease cannot be committed twice. Unused response
 and timeout capacity is released. Active leases must be zero before final evidence is built.
 
 ## Byte accounting
 
-Response bytes are measured while streaming and reading stops at the reserved bound. Request bytes
-are a deterministic conservative semantic upper-bound: request line, represented headers, body,
-and a fixed HTTP-library overhead. This is not wire telemetry because HTTPX may alter framing,
-encoding, or protocol representation. v7 records estimator version
-`semantic-request-upper-bound/1.0` and the `SEMANTIC_REQUEST_BYTE_ESTIMATE` limitation.
+Request accounting measures the final HTTPX request representation: request line, generated and
+caller fields, cookie state, and body. Response accounting includes the represented status line,
+fields, and bounded body; streaming stops when the remaining response allowance is consumed.
+
+These values are semantic representation accounting, not wire telemetry. HTTP/2 framing,
+compression, TLS records, and proxy protocol bytes are outside the supported HTTPX interface. Plan
+summaries retain a declared-request preflight estimate because response-derived cookie state does
+not exist before execution; every actual attempt still reserves its prepared size before sending.
+HTTPX parses the response head before exposing the stream. A head that alone exceeds the allowance
+is recorded as a policy abort with observed and charged representation sizes; MRMA cannot preempt
+that parser step through HTTPX's supported interface.
 
 ## Duration accounting
 

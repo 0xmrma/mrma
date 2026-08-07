@@ -6,6 +6,7 @@ import json
 import re
 import socket
 import threading
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -70,10 +71,26 @@ def _canonical_host(value: str) -> str:
     try:
         return str(ipaddress.ip_address(host))
     except ValueError:
-        try:
-            return host.encode("idna").decode("ascii")
-        except UnicodeError as exc:
-            raise AuthorizationError("INVALID_HOST", "host cannot be IDNA-canonicalized") from exc
+        pass
+    if not host.isascii():
+        raise AuthorizationError(
+            "NON_ASCII_HOST_REJECTED",
+            "authorization hosts must be explicit ASCII A-labels",
+        )
+    labels = host.split(".")
+    if (
+        len(host) > 253
+        or any(
+            not label
+            or len(label) > 63
+            or label.startswith("-")
+            or label.endswith("-")
+            or re.fullmatch(r"[a-z0-9-]+", label) is None
+            for label in labels
+        )
+    ):
+        raise AuthorizationError("INVALID_HOST", "authorization host labels are malformed")
+    return host
 
 
 def _parse_time(value: str, field: str) -> datetime:
@@ -160,6 +177,17 @@ def _authority_text(host: str, port: int, scheme: str) -> str:
     display_host = f"[{host}]" if ":" in host else host
     default_port = 443 if scheme == "https" else 80
     return display_host if port == default_port else f"{display_host}:{port}"
+
+
+def canonical_host_authority(value: str, scheme: str) -> str:
+    """Canonicalize one explicit Host field without applying an IDNA mapping."""
+    normalized_scheme = scheme.lower()
+    if normalized_scheme not in {"http", "https"}:
+        raise AuthorizationError("INVALID_HOST_AUTHORITY", "Host requires an HTTP target scheme")
+    default_port = 443 if normalized_scheme == "https" else 80
+    host, port = _parse_authority(value, default_port=default_port)
+    assert port is not None
+    return _authority_text(host, port, normalized_scheme)
 
 
 @dataclass(frozen=True)
@@ -303,6 +331,20 @@ class AuthorizedRequestContext:
     def __post_init__(self) -> None:
         if not self.decision.accepted:
             raise ValueError("an authorized request context requires an accepted decision")
+
+
+@dataclass(frozen=True)
+class MutationValidation:
+    family: str
+    baseline_fingerprint: str
+    mutation_fingerprint: str
+    delta_digest: str
+    required_operations: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class AuthorizedMutationContext(AuthorizedRequestContext):
+    mutation: MutationValidation = field(repr=False, kw_only=True)
 
 
 def _parse_query_policy(value: object, *, required: bool, field: str) -> QueryPolicy:
@@ -806,6 +848,48 @@ def _path_allowed(path: str, prefixes: tuple[str, ...]) -> bool:
     return False
 
 
+def _validate_unambiguous_target(parts: object) -> None:
+    path = getattr(parts, "path")
+    query = getattr(parts, "query")
+    fragment = getattr(parts, "fragment")
+    try:
+        path.encode("ascii")
+        query.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise AuthorizationError(
+            "AMBIGUOUS_TARGET_ENCODING",
+            "request paths and queries must use an ASCII representation",
+        ) from exc
+    if fragment:
+        raise AuthorizationError("URL_FRAGMENT_REJECTED", "request targets cannot contain fragments")
+    if "\\" in path or "\\" in query or "%" in path:
+        raise AuthorizationError(
+            "AMBIGUOUS_TARGET_ENCODING",
+            "backslashes and percent-encoded path octets are not accepted",
+        )
+    if re.search(r"%(?![0-9A-Fa-f]{2})", query):
+        raise AuthorizationError("AMBIGUOUS_TARGET_ENCODING", "query contains a malformed escape")
+    escaped_octets = [int(match.group(1), 16) for match in re.finditer(r"%([0-9A-Fa-f]{2})", query)]
+    if ";" in query or any(
+        octet <= 0x20
+        or octet == 0x7F
+        or octet >= 0x80
+        or octet in {ord("%"), ord("&"), ord(";"), ord("="), ord("\\")}
+        for octet in escaped_octets
+    ):
+        raise AuthorizationError(
+            "AMBIGUOUS_TARGET_ENCODING",
+            "query contains an encoding with parser-dependent semantics",
+        )
+    for query_field in query.split("&") if query else ():
+        key = query_field.split("=", 1)[0]
+        if not key or "%" in key or "+" in key or re.fullmatch(r"[A-Za-z0-9._~-]+", key) is None:
+            raise AuthorizationError(
+                "AMBIGUOUS_QUERY_KEY",
+                "query keys must use one literal ASCII representation",
+            )
+
+
 def _query_allowed(query: str, policy: QueryPolicy) -> bool:
     try:
         query_bytes = query.encode("ascii")
@@ -839,6 +923,15 @@ def _query_allowed(query: str, policy: QueryPolicy) -> bool:
 
 
 def _target_url(request: RawRequest, base_url: str) -> str:
+    if any(
+        ord(character) <= 0x20 or ord(character) == 0x7F
+        for source in (request.path, base_url)
+        for character in source
+    ):
+        raise AuthorizationError(
+            "AMBIGUOUS_TARGET_ENCODING",
+            "request targets cannot contain spaces or control characters",
+        )
     if request.target_form == "absolute":
         raw = request.path
     elif request.target_form == "origin":
@@ -850,6 +943,7 @@ def _target_url(request: RawRequest, base_url: str) -> str:
         )
     try:
         parts = urlsplit(raw)
+        _validate_unambiguous_target(parts)
         if parts.username is not None or parts.password is not None:
             raise AuthorizationError("URL_USERINFO_REJECTED", "URL userinfo is not supported")
         if not parts.scheme or not parts.hostname:
@@ -876,6 +970,73 @@ def request_fingerprint(request: RawRequest, canonical_url: str) -> str:
         "body_length": len(request.body),
     }
     return "sha256:" + hashlib.sha256(_canonical_json(payload)).hexdigest()
+
+
+def _raw_request_fingerprint(request: RawRequest) -> str:
+    payload = {
+        "method": request.method,
+        "path": request.path,
+        "http_version": request.http_version,
+        "target_form": request.target_form,
+        "headers": request.headers,
+        "body_sha256": hashlib.sha256(request.body).hexdigest(),
+        "body_length": len(request.body),
+    }
+    return "sha256:" + hashlib.sha256(_canonical_json(payload)).hexdigest()
+
+
+def _header_operations(old_values: list[str], new_values: list[str]) -> tuple[str, ...]:
+    if old_values == new_values:
+        return ()
+    old_counts = Counter(old_values)
+    new_counts = Counter(new_values)
+    common = old_counts & new_counts
+
+    def retained(values: list[str]) -> list[str]:
+        remaining = common.copy()
+        result: list[str] = []
+        for value in values:
+            if remaining[value] > 0:
+                result.append(value)
+                remaining[value] -= 1
+        return result
+
+    if retained(old_values) != retained(new_values):
+        return ("reorder",)
+    removed = sum((old_counts - new_counts).values())
+    added = sum((new_counts - old_counts).values())
+    replaced = min(removed, added)
+    operations: list[str] = []
+    if replaced:
+        operations.append("replace")
+    if added > replaced:
+        operations.append("add")
+    if removed > replaced:
+        operations.append("remove")
+    return tuple(operations)
+
+
+def _ordered_subsequence(
+    candidate: list[tuple[str, str]],
+    source: list[tuple[str, str]],
+) -> bool:
+    position = 0
+    for item in candidate:
+        while position < len(source) and source[position] != item:
+            position += 1
+        if position == len(source):
+            return False
+        position += 1
+    return True
+
+
+def _safe_redirect_derivation(mutation: RawRequest, outgoing: RawRequest) -> bool:
+    return (
+        outgoing.method in {mutation.method, "GET"}
+        and outgoing.http_version == mutation.http_version
+        and outgoing.body in {mutation.body, b""}
+        and _ordered_subsequence(outgoing.headers, mutation.headers)
+    )
 
 
 def _effective_authorities(
@@ -961,9 +1122,10 @@ class ManifestAuthorizationPolicy:
         mutation: RawRequest,
         *,
         mutation_family: str,
-    ) -> None:
+    ) -> MutationValidation:
+        required: list[str] = []
         if mutation_family != "header" or self.manifest.header_mutations is None:
-            return
+            return self._mutation_validation(baseline, mutation, mutation_family, required)
         policy = self.manifest.header_mutations
         before: dict[str, list[str]] = {}
         after: dict[str, list[str]] = {}
@@ -976,17 +1138,24 @@ class ManifestAuthorizationPolicy:
             new_values = after.get(name, [])
             if old_values == new_values:
                 continue
-            operation = "add" if not old_values else "remove" if not new_values else "replace"
             if name in policy.deny_names or name not in policy.allow_names:
                 raise AuthorizationError(
                     "HEADER_MUTATION_NOT_AUTHORIZED",
                     f"header mutation for {name!r} is outside policy",
                 )
-            if operation not in policy.operations:
+            operations = _header_operations(old_values, new_values)
+            if "reorder" in operations:
                 raise AuthorizationError(
-                    "HEADER_MUTATION_OPERATION_NOT_AUTHORIZED",
-                    f"{operation} is outside header mutation policy",
+                    "HEADER_MUTATION_REORDER_NOT_AUTHORIZED",
+                    f"duplicate values for {name!r} changed order",
                 )
+            for operation in operations:
+                if operation not in policy.operations:
+                    raise AuthorizationError(
+                        "HEADER_MUTATION_OPERATION_NOT_AUTHORIZED",
+                        f"{operation} is outside header mutation policy",
+                    )
+                required.append(f"{name}:{operation}")
             try:
                 value_lengths = [len(value.encode("latin-1")) for value in new_values]
             except UnicodeEncodeError as exc:
@@ -1003,6 +1172,80 @@ class ManifestAuthorizationPolicy:
                 raise AuthorizationError(
                     "HOST_MUTATION_NOT_AUTHORIZED", "Host mutation requires explicit authorization"
                 )
+        return self._mutation_validation(baseline, mutation, mutation_family, required)
+
+    def _mutation_validation(
+        self,
+        baseline: RawRequest,
+        mutation: RawRequest,
+        family: str,
+        required_operations: list[str],
+    ) -> MutationValidation:
+        baseline_fingerprint = _raw_request_fingerprint(baseline)
+        mutation_fingerprint = _raw_request_fingerprint(mutation)
+        payload = {
+            "policy_version": AUTHORIZATION_POLICY_VERSION,
+            "manifest_digest": self.manifest.digest,
+            "family": family,
+            "baseline_fingerprint": baseline_fingerprint,
+            "mutation_fingerprint": mutation_fingerprint,
+            "required_operations": sorted(required_operations),
+        }
+        return MutationValidation(
+            family=family,
+            baseline_fingerprint=baseline_fingerprint,
+            mutation_fingerprint=mutation_fingerprint,
+            delta_digest="sha256:" + hashlib.sha256(_canonical_json(payload)).hexdigest(),
+            required_operations=tuple(sorted(required_operations)),
+        )
+
+    def authorize_mutation(
+        self,
+        baseline: RawRequest,
+        mutation: RawRequest,
+        outgoing_request: RawRequest,
+        *,
+        base_url: str,
+        attempt_kind: str,
+        mutation_family: str,
+        risk_class: str | None = None,
+        proxy_url: str | None = None,
+        consume_repetition: bool = True,
+    ) -> AuthorizedMutationContext:
+        validation = self.validate_mutation(
+            baseline,
+            mutation,
+            mutation_family=mutation_family,
+        )
+        outgoing_fingerprint = _raw_request_fingerprint(outgoing_request)
+        if outgoing_fingerprint != validation.mutation_fingerprint and (
+            attempt_kind not in {"redirect", "retry"}
+            or not _safe_redirect_derivation(mutation, outgoing_request)
+        ):
+            raise AuthorizationError(
+                "MUTATION_DERIVATION_NOT_AUTHORIZED",
+                "outgoing mutation does not match the validated mutation or a removal-only redirect derivation",
+            )
+        context = self.authorize(
+            outgoing_request,
+            base_url=base_url,
+            attempt_kind=attempt_kind,
+            mutation_family=mutation_family,
+            risk_class=risk_class,
+            proxy_url=proxy_url,
+            consume_repetition=consume_repetition,
+        )
+        return AuthorizedMutationContext(
+            decision=context.decision,
+            canonical_url=context.canonical_url,
+            resolved_addresses=context.resolved_addresses,
+            authorized_at=context.authorized_at,
+            rule_index=context.rule_index,
+            request_fingerprint=context.request_fingerprint,
+            proxy_url=context.proxy_url,
+            effective_host_authority=context.effective_host_authority,
+            mutation=validation,
+        )
 
     def _authorize_proxy(self, proxy_url: str | None) -> tuple[str, ...]:
         if proxy_url is None:

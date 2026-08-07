@@ -33,6 +33,7 @@ def effective_plan_digest(document: Mapping[str, object]) -> str:
 class PlanSummary:
     schema_version: str
     plan_digest: str
+    approval_plan_digest: str
     maximum_rounds: int
     observations_per_round: int
     maximum_logical_observations: int
@@ -61,6 +62,11 @@ class PlanSummary:
     def to_journal_dict(self) -> dict[str, object]:
         payload = self.to_dict()
         payload.pop("effective_plan")
+        return payload
+
+    def to_private_dict(self) -> dict[str, object]:
+        payload = self.to_dict()
+        payload["approval_plan_digest"] = self.approval_plan_digest
         return payload
 
 
@@ -95,7 +101,12 @@ class ExperimentPlan:
         ):
             raise ValueError("hook request input is not eligible for semantic HTTP replay")
 
-    def _request_document(self, request: RawRequest) -> dict[str, object]:
+    def _request_document(
+        self,
+        request: RawRequest,
+        *,
+        stable_private: bool = False,
+    ) -> dict[str, object]:
         target = (
             request.path
             if request.target_form == "absolute"
@@ -103,23 +114,30 @@ class ExperimentPlan:
         )
         canonical_target = canonical_uri(target)
         redactor = self.experiment.redactor
+
+        def fingerprint(value: str | bytes, label: str) -> str:
+            if stable_private:
+                raw = value if isinstance(value, bytes) else value.encode("utf-8")
+                return "sha256:" + hashlib.sha256(label.encode("ascii") + b"\0" + raw).hexdigest()
+            return redactor.fingerprint(value, label=label)
+
         return {
             "method": request.method,
-            "target": redactor.url(canonical_target),
+            "target": canonical_target if stable_private else redactor.url(canonical_target),
             "declared_http_version": request.http_version,
             "target_form": request.target_form,
             "headers": [
                 {
                     "position": position,
-                    "name": redactor.header_name(name),
-                    "value_fingerprint": redactor.fingerprint(
+                    "name": name.lower() if stable_private else redactor.header_name(name),
+                    "value_fingerprint": fingerprint(
                         value,
-                        label=f"plan-header-value:{name.lower()}",
+                        f"plan-header-value:{name.lower()}",
                     ),
                 }
                 for position, (name, value) in enumerate(request.headers)
             ],
-            "body_fingerprint": redactor.fingerprint(request.body, label="plan-request-body"),
+            "body_fingerprint": fingerprint(request.body, "plan-request-body"),
             "body_length": len(request.body),
             "original_source_sha256": (
                 f"sha256:{request.original_sha256}"
@@ -139,6 +157,7 @@ class ExperimentPlan:
         authorization_digest: str | None,
         comparison_policy: dict[str, object] | None,
         transport_policy: dict[str, object] | None,
+        stable_private: bool = False,
     ) -> dict[str, object]:
         redactor = self.experiment.redactor
         resolved_comparison = dict(
@@ -149,16 +168,27 @@ class ExperimentPlan:
             ignore_headers = cast(tuple[str, ...], resolved_comparison["ignore_headers"])
             resolved_comparison["ignore_headers"] = list(ignore_headers)
         resolved_comparison["ignore_body_regex_fingerprints"] = [
-            redactor.fingerprint(pattern, label="plan-normalization-rule")
+            (
+                "sha256:"
+                + hashlib.sha256(b"plan-normalization-rule\0" + pattern.encode("utf-8")).hexdigest()
+                if stable_private
+                else redactor.fingerprint(pattern, label="plan-normalization-rule")
+            )
             for pattern in patterns
         ]
         return {
             "schema_version": PLAN_SCHEMA_VERSION,
             "requests": {
-                "baseline": self._request_document(self.baseline),
-                "mutation": self._request_document(self.mutation),
-                "setup": [self._request_document(request) for request in self.setup_hooks],
-                "reset": [self._request_document(request) for request in self.reset_hooks],
+                "baseline": self._request_document(self.baseline, stable_private=stable_private),
+                "mutation": self._request_document(self.mutation, stable_private=stable_private),
+                "setup": [
+                    self._request_document(request, stable_private=stable_private)
+                    for request in self.setup_hooks
+                ],
+                "reset": [
+                    self._request_document(request, stable_private=stable_private)
+                    for request in self.reset_hooks
+                ],
             },
             "experiment": {
                 "minimum_rounds": self.experiment.round_limits()[0],
@@ -175,7 +205,14 @@ class ExperimentPlan:
                 "response_header_scope": self.experiment.response_header_scope,
                 "include_response_headers": list(self.experiment.include_response_headers),
                 "include_response_header_pattern_fingerprints": [
-                    redactor.fingerprint(pattern, label="plan-header-pattern")
+                    (
+                        "sha256:"
+                        + hashlib.sha256(
+                            b"plan-header-pattern\0" + pattern.encode("utf-8")
+                        ).hexdigest()
+                        if stable_private
+                        else redactor.fingerprint(pattern, label="plan-header-pattern")
+                    )
                     for pattern in self.experiment.include_response_header_patterns
                 ],
                 "exclude_response_headers": list(self.experiment.exclude_response_headers),
@@ -223,6 +260,7 @@ class ExperimentPlan:
         authorization_digest: str | None = None,
         comparison_policy: dict[str, object] | None = None,
         transport_policy: dict[str, object] | None = None,
+        approval_transport_policy: dict[str, object] | None = None,
     ) -> PlanSummary:
         _, maximum_rounds = self.experiment.round_limits()
         observations_per_round = 3 if self.experiment.schedule_mode == "bracketed" else 2
@@ -252,9 +290,21 @@ class ExperimentPlan:
             transport_policy=transport_policy,
         )
         digest = effective_plan_digest(digest_payload)
+        approval_payload = self._effective_plan_document(
+            redirect_depth=redirect_depth,
+            authorization_digest=authorization_digest,
+            comparison_policy=comparison_policy,
+            transport_policy=approval_transport_policy or transport_policy,
+            stable_private=True,
+        )
+        approval_payload["private_approval_policy"] = {
+            "privacy_policy": self.experiment.redactor.policy,
+            "digest_visibility": "local-only",
+        }
         return PlanSummary(
             schema_version=PLAN_SCHEMA_VERSION,
             plan_digest=digest,
+            approval_plan_digest=effective_plan_digest(approval_payload),
             maximum_rounds=maximum_rounds,
             observations_per_round=observations_per_round,
             maximum_logical_observations=logical,

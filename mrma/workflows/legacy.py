@@ -86,11 +86,6 @@ class LegacyAuthorizedDispatcher:
         return self._oracle
 
     def __call__(self, request: RawRequest, base_url: str, options: SendOptions) -> object:
-        self.authorization.validate_mutation(
-            self.baseline,
-            request,
-            mutation_family="header",
-        )
         oracle = self._prepare(options)
         self._sequence += 1
         risk = classify_method(request.method).risk_class
@@ -104,7 +99,7 @@ class LegacyAuthorizedDispatcher:
             redactor=self.redactor,
         )
         plan = ExperimentPlan(
-            baseline=request,
+            baseline=self.baseline,
             mutation=request,
             base_url=base_url,
             experiment=config,

@@ -71,6 +71,29 @@ MUTATIONS = (
         ("tests/test_authorization.py::test_authorization_v2_enforces_query_and_header_mutation_scope",),
     ),
     Mutation(
+        "AUTH-AMBIGUOUS-TARGET",
+        "mrma/policy/authorization.py",
+        'if "\\\\" in path or "\\\\" in query or "%" in path:',
+        'if "\\\\" in path or "\\\\" in query or False:',
+        ("tests/test_authorization.py::test_authorization_v2_rejects_ambiguous_target_encodings",),
+    ),
+    Mutation(
+        "AUTH-ASCII-HOST",
+        "mrma/policy/authorization.py",
+        "if not host.isascii():",
+        "if False:",
+        ("tests/test_authorization.py::test_authorization_requires_explicit_ascii_host_labels",),
+    ),
+    Mutation(
+        "AUTH-DUPLICATE-MIXED-OPS",
+        "mrma/policy/authorization.py",
+        "for operation in operations:",
+        "for operation in operations[:1]:",
+        (
+            "tests/test_authorization.py::test_header_mutation_authorization_accounts_for_duplicate_operations",
+        ),
+    ),
+    Mutation(
         "AUTH-REPETITION-BOUNDARY",
         "mrma/policy/authorization.py",
         "repetitions > maximum_repetitions",
@@ -120,6 +143,15 @@ MUTATIONS = (
         ("tests/test_experiment.py::test_missing_content_type_defaults_to_digest_only_evidence",),
     ),
     Mutation(
+        "VERDICT-RAW-DIGEST-GUARD",
+        "mrma/core/experiment.py",
+        "elif raw_complete_difference:",
+        "elif False:",
+        (
+            "tests/test_experiment.py::test_normalized_raw_body_differences_cannot_support_no_influence",
+        ),
+    ),
+    Mutation(
         "REDIRECT-CROSS-ORIGIN-FIELDS",
         "mrma/engine/oracle.py",
         "if cross_origin and not allow_all_cross_origin and lowered not in cross_origin_fields:",
@@ -129,16 +161,23 @@ MUTATIONS = (
     Mutation(
         "OBSERVATION-SESSION-STATE",
         "mrma/core/http_client.py",
-        "if active is None:\n            client, close_after = self._client_for(arm, round_index)\n            self._before_observation(client, arm)",
-        "if active is not None:\n            client, close_after = self._client_for(arm, round_index)\n            self._before_observation(client, arm)",
+        'if arm != active_arm or round_index != active_round:\n            raise RuntimeError("prepared request does not belong to the active observation")\n        return _build_request(',
+        'if arm != active_arm or round_index != active_round:\n            raise RuntimeError("prepared request does not belong to the active observation")\n        client.cookies.clear()\n        return _build_request(',
         ("tests/test_oracle.py::test_isolated_observation_preserves_redirect_cookie_only_inside_chain",),
     ),
     Mutation(
         "PLAN-BODY-IDENTITY",
         "mrma/engine/plan.py",
-        '"body_fingerprint": redactor.fingerprint(request.body, label="plan-request-body"),',
+        '"body_fingerprint": fingerprint(request.body, "plan-request-body"),',
         '"body_fingerprint": "hmac-sha256:" + "0" * 64,',
         ("tests/test_oracle.py::test_plan_digest_binds_effective_request_and_decision_policy",),
+    ),
+    Mutation(
+        "PLAN-APPROVAL-STABILITY",
+        "mrma/engine/plan.py",
+        "approval_plan_digest=effective_plan_digest(approval_payload),",
+        "approval_plan_digest=digest,",
+        ("tests/test_oracle.py::test_private_approval_digest_is_stable_across_run_redactors",),
     ),
     Mutation(
         "PARTIAL-COMPLETE-SAMPLING",
@@ -150,8 +189,8 @@ MUTATIONS = (
     Mutation(
         "LEGACY-MUTATION-BASELINE",
         "mrma/workflows/legacy.py",
-        "self.authorization.validate_mutation(\n            self.baseline,\n            request,",
-        "self.authorization.validate_mutation(\n            request,\n            request,",
+        "baseline=self.baseline,\n            mutation=request,",
+        "baseline=request,\n            mutation=request,",
         (
             "tests/test_legacy_workflow.py::test_legacy_dispatcher_binds_allowed_forbidden_and_oversized_headers",
         ),
@@ -164,6 +203,27 @@ MUTATIONS = (
         (
             "tests/test_http_client.py::test_final_built_request_suppresses_explicit_and_cookie_jar_fields",
         ),
+    ),
+    Mutation(
+        "TRANSPORT-MUTATION-CONTEXT",
+        "mrma/transport/semantic_http.py",
+        'if normalized_arm == "mutation" and not isinstance(\n            authorization, AuthorizedMutationContext\n        ):',
+        'if normalized_arm == "mutation" and False:',
+        ("tests/test_transport_policy.py::test_mutation_arm_requires_delta_bound_authorization",),
+    ),
+    Mutation(
+        "TRANSPORT-PREPARED-BYTES",
+        "mrma/transport/semantic_http.py",
+        "if prepared.represented_bytes > lease.proposed.request_bytes:",
+        "if False:",
+        ("tests/test_transport_policy.py::test_transport_rejects_missing_or_mismatched_policy_contexts",),
+    ),
+    Mutation(
+        "TRANSPORT-RESPONSE-HEADERS",
+        "mrma/transport/semantic_http.py",
+        "charged_received = min(response.represented_bytes, lease.response_allowance)",
+        "charged_received = min(response.body_length, lease.response_allowance)",
+        ("tests/test_transport_policy.py::test_response_budget_charges_headers_and_body",),
     ),
     Mutation(
         "REDIRECT-CROSS-ORIGIN-STATE-RESET",
@@ -195,9 +255,9 @@ MUTATIONS = (
     Mutation(
         "VERSIONED-V7-BUILDER",
         "mrma/evidence/models.py",
-        'document["schema_version"] = "mrma.experiment/v7"',
-        'document["schema_version"] = "mrma.experiment/v8"',
-        ("tests/test_oracle.py::test_versioned_v7_builder_emits_schema_valid_v7",),
+        'raise ValueError(\n        "new mrma.experiment/v7 generation is disabled; use build_experiment_v8"\n    )',
+        "return {}",
+        ("tests/test_oracle.py::test_versioned_v7_builder_rejects_new_generation",),
     ),
 )
 

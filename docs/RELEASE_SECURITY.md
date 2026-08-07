@@ -22,20 +22,20 @@ Install a current GitHub CLI, authenticate it, download both distributions, and 
 GitHub-signed build provenance before installation:
 
 ```bash
-gh release verify v0.4.2 -R 0xmrma/mrma
-gh release download v0.4.2 -R 0xmrma/mrma \
-  --pattern 'mrma-0.4.2-py3-none-any.whl' \
-  --pattern 'mrma-0.4.2.tar.gz'
-gh release verify-asset v0.4.2 ./mrma-0.4.2-py3-none-any.whl -R 0xmrma/mrma
-gh release verify-asset v0.4.2 ./mrma-0.4.2.tar.gz -R 0xmrma/mrma
-gh attestation verify ./mrma-0.4.2-py3-none-any.whl \
+gh release verify v0.4.3 -R 0xmrma/mrma
+gh release download v0.4.3 -R 0xmrma/mrma \
+  --pattern 'mrma-0.4.3-py3-none-any.whl' \
+  --pattern 'mrma-0.4.3.tar.gz'
+gh release verify-asset v0.4.3 ./mrma-0.4.3-py3-none-any.whl -R 0xmrma/mrma
+gh release verify-asset v0.4.3 ./mrma-0.4.3.tar.gz -R 0xmrma/mrma
+gh attestation verify ./mrma-0.4.3-py3-none-any.whl \
   -R 0xmrma/mrma \
   --signer-workflow 0xmrma/mrma/.github/workflows/release.yml \
-  --source-ref refs/tags/v0.4.2
-gh attestation verify ./mrma-0.4.2.tar.gz \
+  --source-ref refs/tags/v0.4.3
+gh attestation verify ./mrma-0.4.3.tar.gz \
   -R 0xmrma/mrma \
   --signer-workflow 0xmrma/mrma/.github/workflows/release.yml \
-  --source-ref refs/tags/v0.4.2
+  --source-ref refs/tags/v0.4.3
 ```
 
 Release v0.4.0 predates repository release-immutability enablement. Its protected signed tag and
@@ -47,10 +47,10 @@ release-level attestation when published.
 Verify the container's GitHub-signed provenance and require the publishing workflow and tag ref:
 
 ```bash
-gh attestation verify oci://ghcr.io/0xmrma/mrma:0.4.2 \
+gh attestation verify oci://ghcr.io/0xmrma/mrma:0.4.3 \
   -R 0xmrma/mrma \
   --signer-workflow 0xmrma/mrma/.github/workflows/package.yml \
-  --source-ref refs/tags/v0.4.2
+  --source-ref refs/tags/v0.4.3
 ```
 
 The image also carries BuildKit provenance and SBOM manifests. Resolve the immutable OCI index
@@ -58,7 +58,7 @@ digest and pin deployments to `ghcr.io/0xmrma/mrma@sha256:...` rather than relyi
 mutable semantic-version tag:
 
 ```bash
-docker buildx imagetools inspect ghcr.io/0xmrma/mrma:0.4.2
+docker buildx imagetools inspect ghcr.io/0xmrma/mrma:0.4.3
 ```
 
 Verification establishes artifact identity and build origin. It does not replace source review,

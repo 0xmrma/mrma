@@ -12,6 +12,18 @@ def test_equivalent_same_body():
     assert r.equivalent is True
 
 
+def test_default_profile_does_not_mask_identifier_shaped_values():
+    left = b'{"value":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
+    right = b'{"value":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}'
+
+    default = equivalent_response(200, left, 200, right, EquivalenceConfig(preset="default"))
+    dynamic = equivalent_response(200, left, 200, right, EquivalenceConfig(preset="dynamic"))
+
+    assert default.equivalent is False
+    assert dynamic.equivalent is True
+    assert dynamic.normalization_outcomes
+
+
 def test_not_equivalent_status_change_when_required():
     cfg = EquivalenceConfig(require_same_status=True)
     r = equivalent_response(200, b"a", 403, b"a", cfg)

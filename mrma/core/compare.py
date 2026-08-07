@@ -267,19 +267,18 @@ def normalize_text(
     final_deadline = deadline or (time.monotonic() + NORMALIZATION_TIMEOUT_S)
     records = outcomes if outcomes is not None else []
 
-    fixed_rules: list[tuple[str, str, int]] = [
-        (
-            r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
-            r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\b",
-            "<UUID>",
-            0,
-        ),
-        (r"\b[0-9a-fA-F]{32,}\b", "<HEX>", 0),
-        (r"\b1[0-9]{9}\b", "<TS>", 0),
-    ]
+    fixed_rules: list[tuple[str, str, int]] = []
     if preset_name in ("dynamic", "nextjs"):
         fixed_rules.extend(
             [
+                (
+                    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
+                    r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\b",
+                    "<UUID>",
+                    0,
+                ),
+                (r"\b[0-9a-fA-F]{32,}\b", "<HEX>", 0),
+                (r"\b1[0-9]{9}\b", "<TS>", 0),
                 (r"\b[A-Za-z0-9+/]{200,}={0,2}\b", "<B64>", 0),
                 (r"(<script[^>]*>)(?s:.*?)(</script>)", r"\1<SCRIPT>\2", regex.IGNORECASE),
                 (r'("csrfToken"\s*:\s*)".*?"', r'\1"<TOKEN>"', regex.IGNORECASE),

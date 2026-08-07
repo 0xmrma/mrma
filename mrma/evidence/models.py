@@ -222,7 +222,10 @@ def build_experiment_v8(
         "code": "SEMANTIC_REQUEST_BYTE_ESTIMATE",
         "severity": "low",
         "scope": "budget_accounting",
-        "message": "Sent-byte accounting is a conservative semantic estimate, not wire telemetry.",
+        "message": (
+            "Sent-byte accounting measures the final prepared semantic representation, not "
+            "protocol framing or wire telemetry."
+        ),
         "remediation": "Use a future protocol-exact backend when exact wire-byte accounting is required.",
     }
     limitations_by_code["CROSS_RUN_POLICY_LINKABILITY"] = {
@@ -469,42 +472,23 @@ def build_experiment_v7(
     container_image_digest: str | None = None,
     insecure_exception: bool = False,
 ) -> dict[str, object]:
-    """Build the frozen v7 contract when its v1 authorization model is representable."""
-    if authorization.manifest.schema_version != "mrma.authorization/v1":
-        raise ValueError("mrma.experiment/v7 can only represent mrma.authorization/v1")
-    document = build_experiment_v8(
+    """Reject new v7 generation while retaining the import for API compatibility."""
+    del (
         result,
-        plan=plan,
-        authorization=authorization,
-        budgets=budgets,
-        journal=journal,
-        run_id=run_id,
-        started_at=started_at,
-        completed_at=completed_at,
-        duration_ms=duration_ms,
-        transport_configuration=transport_configuration,
-        source_commit=source_commit,
-        package_digest=package_digest,
-        container_image_digest=container_image_digest,
-        insecure_exception=insecure_exception,
+        plan,
+        authorization,
+        budgets,
+        journal,
+        run_id,
+        started_at,
+        completed_at,
+        duration_ms,
+        transport_configuration,
+        source_commit,
+        package_digest,
+        container_image_digest,
+        insecure_exception,
     )
-    document["schema_version"] = "mrma.experiment/v7"
-    authorization_document = cast(dict[str, object], document["authorization"])
-    for field_name in (
-        "authority_mode",
-        "host_mutation_authorized",
-        "cross_origin_header_mode",
-        "query_policy_version",
-        "mutation_policy_version",
-    ):
-        authorization_document.pop(field_name, None)
-    plan_document = cast(dict[str, object], document["plan"])
-    plan_document["schema_version"] = "mrma.plan/v1"
-    plan_document.pop("effective_plan", None)
-    analysis = result.experiment
-    document["privacy"] = {
-        "policy": analysis.config.redactor.policy,
-        "fingerprints": "per-run keyed HMAC-SHA256",
-        "cross_run_correlation": False,
-    }
-    return document
+    raise ValueError(
+        "new mrma.experiment/v7 generation is disabled; use build_experiment_v8"
+    )

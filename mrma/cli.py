@@ -1185,7 +1185,7 @@ def cmd_experiment(args: argparse.Namespace) -> int:
             "valid": True,
             "network_attempts": 0,
             "authorization": authorization.manifest.public_summary(),
-            "plan": summary.to_dict(),
+            "plan": summary.to_private_dict(),
             "journal": {
                 "head_digest": journal.head_digest,
                 "event_count": len(journal.events),
@@ -1195,6 +1195,7 @@ def cmd_experiment(args: argparse.Namespace) -> int:
             return 0
         console.print("[success]Plan validated without networking.[/success]")
         console.print(f"Plan digest: {summary.plan_digest}")
+        console.print(f"Approval plan digest: {summary.approval_plan_digest}")
         console.print(f"Maximum network attempts: {summary.maximum_attempts_with_redirects}")
         console.print(f"Maximum estimated request bytes: {summary.maximum_request_bytes}")
         console.print(f"Maximum response bytes: {summary.maximum_response_bytes}")

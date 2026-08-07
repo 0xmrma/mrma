@@ -71,14 +71,15 @@ journal.close()
 ```
 
 Call `dry_run` before `run` when building programmatic plans. It validates comparison policy,
-worst-case aggregate capacity, target/mutation/hook authorization, and request bounds without
-consuming repetition or budget.
+declared aggregate capacity, target/mutation/hook authorization, and request bounds without
+consuming repetition or budget. `PlanSummary.approval_plan_digest` is a deterministic local identity;
+`PlanSummary.to_dict()` deliberately excludes it from shared evidence.
 
 ## Evidence APIs
 
 - `build_experiment_v8`: convert an `OracleRunResult` plus provenance into strict evidence.
-- `build_experiment_v7`: emit the frozen v7 contract when the run uses authorization v1; it rejects
-  authorization models that v7 cannot represent.
+- `build_experiment_v7`: retained as an import-compatible rejection path. New v7 generation is
+  disabled; existing v7 documents remain verifiable.
 - `validate_result_document`: JSON Schema and semantic cross-field verification.
 - `create_evidence_bundle`: deterministic atomic bundle creation from public evidence and journal.
 - `verify_evidence`, `verify_evidence_bundle`, `verify_journal`: offline integrity verification.

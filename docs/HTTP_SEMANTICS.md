@@ -52,6 +52,11 @@ complete retained body, strict eligible decoding, duplicate-key rejection, finit
 numeric bounds. Resource failure makes comparison indeterminate and records comparator versions and
 limitations.
 
+The default preset performs no identifier-shaped masking. UUID, long hexadecimal, timestamp, and
+other dynamic-value rules require an explicit normalization preset. When complete raw body digests
+differ, normalized or approximate equivalence becomes indeterminate and cannot support
+`NO_INFLUENCE_OBSERVED`.
+
 ## Raw request ingestion
 
 `parse_raw_http_request_bytes` preserves binary body bytes, header order/duplicates, method case,

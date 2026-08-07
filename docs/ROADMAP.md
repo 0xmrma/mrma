@@ -101,9 +101,18 @@ adding more mutation families.
 - [x] Recompute effective-plan digests during result and bundle verification
 - [x] Bind bundle results to journal `RUN_PLANNED` digests
 - [x] Restore benchmark v1 byte-for-byte and lock every schema published through v0.4.1
-- [x] Make the versioned v7 Python builder emit only schema-valid v7 evidence
+- [x] Keep the versioned v7 Python builder schema-valid for its published release
 
-Version 0.4.2 is the maintained 0.4 baseline. The items below are optional research directions,
+## 0.4.3 - Maintained correctness baseline
+
+- [x] Reject ambiguous path/query encodings and implicit Unicode host conversion
+- [x] Authorize ordered duplicate-header mutations and bind a mutation proof into transport
+- [x] Reserve the final prepared HTTPX request and account for represented response fields
+- [x] Make default normalization literal and prevent normalized differences from supporting no influence
+- [x] Add a deterministic local approval-plan digest without exposing it in shared evidence
+- [x] Disable new v7 generation while retaining verification of existing v7 documents
+
+Version 0.4.3 is the maintained 0.4 baseline. The items below are optional research directions,
 not commitments or current product claims.
 
 ## Possible 0.5 - Product-wide evidence oracle

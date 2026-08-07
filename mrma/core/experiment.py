@@ -984,10 +984,21 @@ def _compare(
                 comparator_resource_limit=comparison.resource_limit,
                 normalization_outcomes=comparison.normalization_outcomes,
             )
-        body_changed = comparison.sim < policy.min_similarity or (
+        raw_complete_difference = (
+            a.body_digest_complete
+            and b.body_digest_complete
+            and (a.length != b.length or a.body_sha256 != b.body_sha256)
+        )
+        body_changed: bool | None = comparison.sim < policy.min_similarity or (
             length_delta_ratio > policy.max_len_delta_ratio
         )
-        classification = PAIR_CHANGED if decisive_change or not comparison.equivalent else PAIR_UNCHANGED
+        if decisive_change or not comparison.equivalent:
+            classification = PAIR_CHANGED
+        elif raw_complete_difference:
+            classification = PAIR_INDETERMINATE
+            body_changed = None
+        else:
+            classification = PAIR_UNCHANGED
         return PairEvidence(
             round_index=b.round_index,
             classification=classification,

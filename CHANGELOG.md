@@ -3,6 +3,48 @@
 All notable changes are documented here. MRMA follows semantic versioning for the CLI and uses an
 independent version in each machine-readable evidence schema.
 
+## 0.4.3 - 2026-08-07
+
+### Authorization Precision
+
+- Reject ambiguous path and query representations before canonicalization, including encoded path
+  octets, double-encoding markers, backslashes, Unicode target text, encoded query keys, and
+  parser-dependent delimiters. Authorization hosts now require explicit ASCII A-labels or IP
+  literals and no longer use Python's implicit IDNA mapping.
+- Evaluate ordered duplicate header values as a complete mutation delta. Mixed add, replace, and
+  remove operations must all be authorized; duplicate-value reordering fails closed under v2.
+- Bind validated baseline/mutation identities, required operations, policy version, and manifest
+  digest into `AuthorizedMutationContext`. Mutation-arm transport rejects ordinary target-only
+  authorization contexts.
+
+### Transport And Comparison
+
+- Build the final HTTPX request before budget reservation, revalidate its method, target, and
+  effective `Host`, reserve its represented size including generated and cookie fields, and send
+  that exact prepared object. Response accounting now includes represented status and header bytes
+  alongside the bounded body.
+- Make the default comparison preset literal. UUID, long hexadecimal, timestamp, and related
+  masking require an explicit dynamic preset. Approximate or normalized equivalence over different
+  complete body digests is indeterminate and cannot support `NO_INFLUENCE_OBSERVED`.
+- Constrain HTTPX to the verified `>=0.27,<0.29` semantic range.
+
+### Evidence And Compatibility
+
+- Add a deterministic local approval-plan digest covering exact request values, authorization,
+  privacy, comparison, and selected transport policy. Shared v8 evidence retains its run-local
+  privacy-safe plan digest and does not expose the approval identity.
+- Disable new `mrma.experiment/v7` generation while retaining the import-compatible rejection path,
+  installed schema, and verification support for existing v7 documents. Published schemas remain
+  unchanged.
+
+### Verification
+
+- The local release suite passes 329 tests with 71% whole-repository branch coverage, 94.94%
+  aggregate critical-runtime coverage, and 86.64% corrected-core coverage. Every gated v0.4
+  runtime module remains above 90%.
+- The 22-case loopback corpus passes 942 attempts with zero errors against its controlled ground
+  truth. The 32-case semantic mutation catalog kills every committed mutant.
+
 ## 0.4.2 - 2026-08-03
 
 ### Authorization And Redirect Enforcement

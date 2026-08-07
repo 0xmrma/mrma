@@ -100,6 +100,8 @@ class CapturedResponse:
     final_origin: str
     http_version: str | None = None
     final_url: str | None = None
+    response_head_bytes: int = 0
+    represented_bytes: int = 0
 
 
 class SemanticHttpTransport:
@@ -313,6 +315,62 @@ class SemanticHttpTransport:
                 if close_after:
                     client.close()
 
+    def prepare(
+        self,
+        req: RawRequest,
+        base_url: str,
+        arm: str,
+        *,
+        round_index: int | None = None,
+        allow_cookie_field: bool = True,
+    ) -> httpx.Request:
+        """Build the exact HTTPX request that a current observation will send."""
+        active = self._active_observation
+        if active is None:
+            raise RuntimeError("request preparation requires an active observation session")
+        client, _close_after, active_arm, active_round = active
+        if arm != active_arm or round_index != active_round:
+            raise RuntimeError("prepared request does not belong to the active observation")
+        return _build_request(
+            client,
+            req,
+            base_url,
+            allow_cookie_field=allow_cookie_field,
+        )
+
+    def capture_prepared(
+        self,
+        request: httpx.Request,
+        arm: str,
+        *,
+        max_response_bytes: int,
+        body_storage: str,
+        round_index: int | None = None,
+    ) -> CapturedResponse:
+        """Send one previously built request without rebuilding effective fields."""
+        if max_response_bytes <= 0:
+            raise ValueError("max_response_bytes must be positive")
+        if body_storage not in BODY_STORAGE_MODES:
+            raise ValueError(f"body_storage must be one of: {', '.join(BODY_STORAGE_MODES)}")
+        active = self._active_observation
+        if active is None:
+            raise RuntimeError("prepared requests require an active observation session")
+        client, _close_after, active_arm, active_round = active
+        if arm != active_arm or round_index != active_round:
+            raise RuntimeError("prepared request does not belong to the active observation")
+        response: httpx.Response | None = None
+        try:
+            response = client.send(request, stream=True)
+            return _capture_response(
+                response,
+                max_response_bytes,
+                body_storage,
+                include_headers_in_limit=True,
+            )
+        finally:
+            if response is not None:
+                response.close()
+
 
 def _merge_url(base_url: str, path: str) -> str:
     if path.startswith("http://") or path.startswith("https://"):
@@ -414,29 +472,48 @@ def _capture_response(
     response: httpx.Response,
     max_response_bytes: int,
     body_storage: str,
+    *,
+    include_headers_in_limit: bool = False,
 ) -> CapturedResponse:
+    version = (response.http_version or "HTTP/1.1").encode("ascii", errors="replace")
+    reason = response.reason_phrase.encode("latin-1", errors="replace")
+    response_head_bytes = (
+        len(version)
+        + 1
+        + 3
+        + 1
+        + len(reason)
+        + 2
+        + sum(len(name) + 2 + len(value) + 2 for name, value in response.headers.raw)
+        + 2
+    )
+    body_limit = (
+        max(0, max_response_bytes - response_head_bytes)
+        if include_headers_in_limit
+        else max_response_bytes
+    )
     retention_limit = {
         "none": 0,
-        "sample": min(SAMPLE_BODY_BYTES, max_response_bytes),
-        "full": max_response_bytes,
+        "sample": min(SAMPLE_BODY_BYTES, body_limit),
+        "full": body_limit,
     }[body_storage]
     retained = bytearray()
     digest = hashlib.sha256()
     observed_length = 0
-    limit_exceeded = False
+    limit_exceeded = include_headers_in_limit and response_head_bytes > max_response_bytes
 
     # Raw transfer bytes keep the read bound effective even for adversarial content encodings.
     # Mock/custom transports may legally return an already-buffered response.
     chunks = (response.content,) if response.is_stream_consumed else response.iter_raw()
     for chunk in chunks:
         next_length = observed_length + len(chunk)
-        if next_length > max_response_bytes:
-            allowed = max(0, max_response_bytes - observed_length)
+        if next_length > body_limit:
+            allowed = max(0, body_limit - observed_length)
             if allowed:
                 digest.update(chunk[:allowed])
                 if len(retained) < retention_limit:
                     retained.extend(chunk[: min(allowed, retention_limit - len(retained))])
-            observed_length = max_response_bytes + 1
+            observed_length = body_limit + 1
             limit_exceeded = True
             break
         digest.update(chunk)
@@ -447,6 +524,7 @@ def _capture_response(
     digest_complete = not limit_exceeded
     retained_complete = digest_complete and len(retained) == observed_length
     headers = tuple((str(name).lower(), str(value)) for name, value in response.headers.multi_items())
+    represented_bytes = response_head_bytes + min(observed_length, body_limit)
     return CapturedResponse(
         status_code=response.status_code,
         headers=headers,
@@ -460,6 +538,8 @@ def _capture_response(
         final_origin=_origin(response.request.url),
         http_version=response.http_version or None,
         final_url=canonical_uri(str(response.request.url)),
+        response_head_bytes=response_head_bytes,
+        represented_bytes=represented_bytes,
     )
 
 

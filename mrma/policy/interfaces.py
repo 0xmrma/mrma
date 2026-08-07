@@ -21,6 +21,19 @@ class AuthorizationPolicy(Protocol):
         proxy_url: str | None = None,
     ) -> object: ...
 
+    def authorize_mutation(
+        self,
+        baseline: RawRequest,
+        mutation: RawRequest,
+        outgoing_request: RawRequest,
+        *,
+        base_url: str,
+        attempt_kind: str,
+        mutation_family: str,
+        risk_class: str | None = None,
+        proxy_url: str | None = None,
+    ) -> object: ...
+
 
 @runtime_checkable
 class BudgetLedgerProtocol(Protocol):
@@ -34,6 +47,15 @@ class EvidenceSink(Protocol):
 
 @runtime_checkable
 class TransportAdapter(Protocol):
+    def prepare(
+        self,
+        request: RawRequest,
+        *,
+        authorization: object,
+        arm: str,
+        round_index: int | None,
+    ) -> object: ...
+
     def send(
         self,
         request: RawRequest,
@@ -43,6 +65,16 @@ class TransportAdapter(Protocol):
         evidence: object,
         arm: str,
         round_index: int | None,
+        body_storage: str,
+    ) -> object: ...
+
+    def send_prepared(
+        self,
+        prepared: object,
+        *,
+        authorization: object,
+        lease: object,
+        evidence: object,
         body_storage: str,
     ) -> object: ...
 
