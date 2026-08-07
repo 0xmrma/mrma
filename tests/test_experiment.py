@@ -114,6 +114,25 @@ def test_no_influence_requires_upper_confidence_bound():
     assert result.mutation_change_interval_95[1] <= 0.2
 
 
+def test_normalized_raw_body_differences_cannot_support_no_influence():
+    baseline, mutated = mutation_pair()
+    control = b'{"value":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
+    changed = b'{"value":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}'
+
+    result = run_experiment(
+        baseline,
+        mutated,
+        lambda arm, _req: FakeResponse(control if arm.startswith("control") else changed),
+        ExperimentConfig(
+            max_rounds=20,
+            equivalence=EquivalenceConfig(preset="dynamic"),
+        ),
+    )
+
+    assert result.verdict == "INCONCLUSIVE"
+    assert all(pair.classification == "INDETERMINATE" for pair in result.pairs)
+
+
 def test_assurance_profile_does_not_compress_independent_dimensions():
     baseline, mutated = mutation_pair()
     result = run_experiment(

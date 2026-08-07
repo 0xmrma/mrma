@@ -12,6 +12,7 @@ from jsonschema import Draft202012Validator
 from mrma.core.raw_request import RawRequest
 from mrma.policy.authorization import (
     AuthorizationError,
+    AuthorizedMutationContext,
     ManifestAuthorizationPolicy,
     load_authorization_manifest,
 )
@@ -575,6 +576,133 @@ def test_authorization_v2_enforces_query_and_header_mutation_scope(
         guarded.validate_mutation(baseline, oversized, mutation_family="header")
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/allowed%2F..%2Fadmin",
+        "/allowed/%252e%252e%252fadmin",
+        "/allowed\\..\\admin",
+        "/allowed?%74oken=secret",
+        "/allowed?token=%2526page%253D1",
+        "/allowed?token=x%3Badmin=true",
+        "/allowed?token=%00admin",
+        "/allowed?token=%E2%88%95admin",
+        "/allowed\u2215admin",
+    ],
+)
+def test_authorization_v2_rejects_ambiguous_target_encodings(
+    authorization_payload,
+    write_authorization,
+    path: str,
+):
+    guarded = policy(authorization_v2(authorization_payload), write_authorization)
+    with pytest.raises(
+        AuthorizationError,
+        match="AMBIGUOUS_TARGET_ENCODING|AMBIGUOUS_QUERY_KEY",
+    ):
+        guarded.authorize(
+            request(path=path),
+            base_url="http://example.test",
+            attempt_kind="control",
+            risk_class="safe",
+        )
+
+
+def test_authorization_requires_explicit_ascii_host_labels(
+    authorization_payload,
+    write_authorization,
+):
+    guarded = policy(authorization_v2(authorization_payload), write_authorization)
+    with pytest.raises(AuthorizationError, match="NON_ASCII_HOST_REJECTED"):
+        guarded.authorize(
+            request(path="http://fa\u00df.de/allowed"),
+            base_url="http://example.test",
+            attempt_kind="control",
+            risk_class="safe",
+        )
+
+
+def test_header_mutation_authorization_accounts_for_duplicate_operations(
+    authorization_payload,
+    write_authorization,
+):
+    payload = authorization_v2(authorization_payload)
+    guarded = policy(payload, write_authorization)
+    baseline = request()
+    baseline.headers.append(("X-Probe", "a"))
+    mutation = request()
+    mutation.headers.extend([("X-Probe", "b"), ("X-Probe", "c")])
+
+    validation = guarded.validate_mutation(baseline, mutation, mutation_family="header")
+    assert validation.required_operations == ("x-probe:add", "x-probe:replace")
+    context = guarded.authorize_mutation(
+        baseline,
+        mutation,
+        mutation,
+        base_url="http://example.test",
+        attempt_kind="mutation",
+        mutation_family="header",
+        risk_class="safe",
+    )
+    assert isinstance(context, AuthorizedMutationContext)
+    assert context.mutation == validation
+
+    add_only = authorization_v2(authorization_payload)
+    add_only["mutation_policy"]["headers"]["operations"] = ["add"]
+    with pytest.raises(AuthorizationError, match="replace is outside"):
+        policy(add_only, write_authorization).validate_mutation(
+            baseline,
+            mutation,
+            mutation_family="header",
+        )
+
+    replace_only = authorization_v2(authorization_payload)
+    replace_only["mutation_policy"]["headers"]["operations"] = ["replace"]
+    with pytest.raises(AuthorizationError, match="add is outside"):
+        policy(replace_only, write_authorization).validate_mutation(
+            baseline,
+            mutation,
+            mutation_family="header",
+        )
+
+
+def test_header_mutation_reordering_fails_closed(
+    authorization_payload,
+    write_authorization,
+):
+    guarded = policy(authorization_v2(authorization_payload), write_authorization)
+    baseline = request()
+    baseline.headers.extend([("X-Probe", "a"), ("X-Probe", "b")])
+    mutation = request()
+    mutation.headers.extend([("X-Probe", "b"), ("X-Probe", "a")])
+
+    with pytest.raises(AuthorizationError, match="HEADER_MUTATION_REORDER_NOT_AUTHORIZED"):
+        guarded.validate_mutation(baseline, mutation, mutation_family="header")
+
+
+def test_mutation_context_rejects_unvalidated_outgoing_changes(
+    authorization_payload,
+    write_authorization,
+):
+    guarded = policy(authorization_v2(authorization_payload), write_authorization)
+    baseline = request()
+    mutation = request()
+    mutation.headers.append(("X-Probe", "1"))
+    changed_after_validation = request()
+    changed_after_validation.headers.extend([("X-Probe", "1"), ("X-Other", "1")])
+
+    with pytest.raises(AuthorizationError, match="MUTATION_DERIVATION_NOT_AUTHORIZED"):
+        guarded.authorize_mutation(
+            baseline,
+            mutation,
+            changed_after_validation,
+            base_url="http://example.test",
+            attempt_kind="mutation",
+            mutation_family="header",
+            risk_class="safe",
+        )
+
+
 def test_authorization_v2_rejects_malformed_and_bounded_queries(
     authorization_payload,
     write_authorization,
@@ -584,7 +712,10 @@ def test_authorization_v2_rejects_malformed_and_bounded_queries(
     guarded = policy(payload, write_authorization)
 
     for path in ("/allowed?too-long=1", "/allowed?bad=%GG"):
-        with pytest.raises(AuthorizationError, match="TARGET_NOT_AUTHORIZED"):
+        with pytest.raises(
+            AuthorizationError,
+            match="TARGET_NOT_AUTHORIZED|AMBIGUOUS_TARGET_ENCODING",
+        ):
             guarded.authorize(
                 request(path=path),
                 base_url="http://example.test",

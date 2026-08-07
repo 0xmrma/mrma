@@ -24,6 +24,6 @@ def test_packaged_release_benchmark_is_schema_valid_and_passed():
     verified = validate_benchmark_document(baseline)
 
     assert verified["passed"] is True
-    assert verified["mrma_version"] == "0.4.2"
+    assert verified["mrma_version"] == "0.4.3"
     assert verified["case_count"] == 22
     assert all(item["passed"] for item in baseline["cases"])

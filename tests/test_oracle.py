@@ -4,7 +4,6 @@ import json
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import replace
-from importlib.resources import files
 from pathlib import Path
 from threading import Event
 from uuid import uuid4
@@ -16,6 +15,7 @@ from jsonschema import Draft202012Validator
 from mrma.core.compare import EquivalenceConfig
 from mrma.core.experiment import ExperimentConfig
 from mrma.core.http_client import CapturedResponse, SemanticHttpTransport, SendOptions
+from mrma.core.privacy import EvidenceRedactor
 from mrma.core.raw_request import RawRequest
 from mrma.core.sender import SendPolicy
 from mrma.engine import ExperimentOracle, ExperimentPlan
@@ -365,11 +365,11 @@ def test_partial_outcomes_are_valid_v8_evidence(
             lambda _request: httpx.Response(200, content=b"ok"),
         )
         if transport_error is not None:
-            monkeypatch.setattr(
-                oracle.transport,
-                "send",
-                lambda *_args, error=transport_error, **_kwargs: (_ for _ in ()).throw(error),
-            )
+                monkeypatch.setattr(
+                    oracle.transport,
+                    "send_prepared",
+                    lambda *_args, error=transport_error, **_kwargs: (_ for _ in ()).throw(error),
+                )
         experiment_plan = plan(follow_redirects=False)
         result = oracle.run(experiment_plan, cancellation=cancellation)
         document = v8_document(oracle, journal, experiment_plan, result)
@@ -556,6 +556,36 @@ def test_plan_digest_binds_effective_request_and_decision_policy():
     ).plan_digest != digest
 
 
+def test_private_approval_digest_is_stable_across_run_redactors():
+    first = plan(follow_redirects=False)
+    second = replace(
+        first,
+        experiment=replace(first.experiment, redactor=EvidenceRedactor()),
+    )
+    changed = replace(
+        second,
+        mutation=replace(second.mutation, headers=second.mutation.headers + [("X-Other", "1")]),
+    )
+    privacy_changed = replace(
+        second,
+        experiment=replace(second.experiment, redactor=EvidenceRedactor(policy="strict")),
+    )
+
+    first_summary = first.summary(0, authorization_digest="sha256:" + "1" * 64)
+    second_summary = second.summary(0, authorization_digest="sha256:" + "1" * 64)
+    changed_summary = changed.summary(0, authorization_digest="sha256:" + "1" * 64)
+    privacy_summary = privacy_changed.summary(0, authorization_digest="sha256:" + "1" * 64)
+
+    assert first_summary.plan_digest != second_summary.plan_digest
+    assert first_summary.approval_plan_digest == second_summary.approval_plan_digest
+    assert changed_summary.approval_plan_digest != first_summary.approval_plan_digest
+    assert privacy_summary.approval_plan_digest != first_summary.approval_plan_digest
+    assert "approval_plan_digest" not in first_summary.to_dict()
+    assert first_summary.to_private_dict()["approval_plan_digest"] == (
+        first_summary.approval_plan_digest
+    )
+
+
 def test_result_verifier_recomputes_effective_plan_digest(
     authorization_payload,
     write_authorization,
@@ -576,7 +606,7 @@ def test_result_verifier_recomputes_effective_plan_digest(
         validate_result_document(document)
 
 
-def test_versioned_v7_builder_emits_schema_valid_v7(
+def test_versioned_v7_builder_rejects_new_generation(
     authorization_payload,
     write_authorization,
     monkeypatch,
@@ -590,34 +620,46 @@ def test_versioned_v7_builder_emits_schema_valid_v7(
     experiment_plan = plan(follow_redirects=False)
     result = oracle.run(experiment_plan)
     journal.close()
-    document = build_experiment_v7(
-        result,
-        plan=experiment_plan,
-        authorization=oracle.authorization,
-        budgets=oracle.budgets,
-        journal=journal,
-        run_id=uuid4().hex,
-        started_at="2026-07-15T12:00:00+00:00",
-        completed_at="2026-07-15T12:01:00+00:00",
-        duration_ms=60000,
-        transport_configuration={
-            "trust_environment": False,
-            "tls": {"verification": "system", "ca_fingerprint": None},
-            "proxy": {
-                "mode": "none",
-                "source": "none",
-                "endpoint_fingerprint": None,
+    with pytest.raises(ValueError, match="v7 generation is disabled"):
+        build_experiment_v7(
+            result,
+            plan=experiment_plan,
+            authorization=oracle.authorization,
+            budgets=oracle.budgets,
+            journal=journal,
+            run_id=uuid4().hex,
+            started_at="2026-07-15T12:00:00+00:00",
+            completed_at="2026-07-15T12:01:00+00:00",
+            duration_ms=60000,
+            transport_configuration={
+                "trust_environment": False,
+                "tls": {"verification": "system", "ca_fingerprint": None},
+                "proxy": {
+                    "mode": "none",
+                    "source": "none",
+                    "endpoint_fingerprint": None,
+                },
             },
-        },
-    )
-    schema = json.loads(
-        files("mrma.schemas").joinpath("experiment-v7.schema.json").read_text(encoding="utf-8")
-    )
+        )
 
-    Draft202012Validator(schema).validate(document)
-    assert document["schema_version"] == "mrma.experiment/v7"
-    assert document["plan"]["schema_version"] == "mrma.plan/v1"
-    assert "effective_plan" not in document["plan"]
+    legacy = v8_document(oracle, journal, experiment_plan, result)
+    legacy["schema_version"] = "mrma.experiment/v7"
+    for field_name in (
+        "authority_mode",
+        "host_mutation_authorized",
+        "cross_origin_header_mode",
+        "query_policy_version",
+        "mutation_policy_version",
+    ):
+        legacy["authorization"].pop(field_name)
+    legacy["plan"]["schema_version"] = "mrma.plan/v1"
+    legacy["plan"].pop("effective_plan")
+    legacy["privacy"] = {
+        "policy": result.experiment.config.redactor.policy,
+        "fingerprints": "per-run keyed HMAC-SHA256",
+        "cross_run_correlation": False,
+    }
+    assert validate_result_document(legacy)["schema_valid"] is True
 
 
 def test_oracle_components_must_share_one_journal(

@@ -23,13 +23,16 @@ from mrma.core.http_semantics import canonical_header_values, canonical_uri
 from mrma.core.raw_request import RawRequest
 from mrma.core.sender import AttemptRecord, RateGate, SendOutcome
 from mrma.evidence.journal import EvidenceContext, EvidenceJournal
-from mrma.policy.authorization import AuthorizationError, ManifestAuthorizationPolicy
+from mrma.policy.authorization import (
+    AuthorizationError,
+    AuthorizedRequestContext,
+    ManifestAuthorizationPolicy,
+)
 from mrma.policy.budget import AttemptCost, BudgetError, BudgetLedger, BudgetSnapshot
 from mrma.policy.comparison import ComparisonPolicy
 from mrma.policy.method_risk import RISK_RANK, classify_method
 from mrma.transport.semantic_http import (
     SemanticHttpAdapter,
-    estimate_semantic_request_bytes,
     origin_fingerprint,
 )
 
@@ -154,6 +157,7 @@ class ExperimentOracle:
             authorization_digest=self.authorization.digest,
             comparison_policy=self.comparison.resolved().to_dict(),
             transport_policy=self.transport.public_policy(),
+            approval_transport_policy=self.transport.approval_policy(),
         )
 
     def _validate_plan_budget(
@@ -252,15 +256,28 @@ class ExperimentOracle:
         summary = self._plan_summary(plan)
         self._validate_plan_budget(plan, summary, require_complete_capacity=True)
         for request, role in ((plan.baseline, "control"), (plan.mutation, "mutation")):
-            context = self.authorization.authorize(
-                request,
-                base_url=plan.base_url,
-                attempt_kind=role,
-                mutation_family=plan.mutation_family if role == "mutation" else None,
-                risk_class=plan.mutation_risk_class if role == "mutation" else "safe",
-                proxy_url=self.transport.options.proxy,
-                consume_repetition=False,
-            )
+            context: AuthorizedRequestContext
+            if role == "mutation":
+                context = self.authorization.authorize_mutation(
+                    plan.baseline,
+                    plan.mutation,
+                    request,
+                    base_url=plan.base_url,
+                    attempt_kind=role,
+                    mutation_family=plan.mutation_family,
+                    risk_class=plan.mutation_risk_class,
+                    proxy_url=self.transport.options.proxy,
+                    consume_repetition=False,
+                )
+            else:
+                context = self.authorization.authorize(
+                    request,
+                    base_url=plan.base_url,
+                    attempt_kind=role,
+                    risk_class="safe",
+                    proxy_url=self.transport.options.proxy,
+                    consume_repetition=False,
+                )
             self.evidence.record(
                 "AUTHORIZATION_ACCEPTED",
                 {
@@ -928,14 +945,26 @@ class ExperimentOracle:
             key=RISK_RANK.__getitem__,
         )
         try:
-            context = self.authorization.authorize(
-                request,
-                base_url=base_url,
-                attempt_kind=role,
-                mutation_family=plan.mutation_family if mutation_attempt else None,
-                risk_class=risk,
-                proxy_url=self.transport.options.proxy,
-            )
+            context: AuthorizedRequestContext
+            if mutation_attempt:
+                context = self.authorization.authorize_mutation(
+                    plan.baseline,
+                    plan.mutation,
+                    request,
+                    base_url=base_url,
+                    attempt_kind=role,
+                    mutation_family=plan.mutation_family,
+                    risk_class=risk,
+                    proxy_url=self.transport.options.proxy,
+                )
+            else:
+                context = self.authorization.authorize(
+                    request,
+                    base_url=base_url,
+                    attempt_kind=role,
+                    risk_class=risk,
+                    proxy_url=self.transport.options.proxy,
+                )
         except AuthorizationError as exc:
             self.evidence.record(
                 "AUTHORIZATION_REJECTED",
@@ -978,12 +1007,19 @@ class ExperimentOracle:
                 "ATTEMPT_TIMEOUT_LIMIT",
                 "transport timeout exceeds the authorized per-attempt timeout",
             )
+        prepared = self.transport.prepare(
+            request,
+            authorization=context,
+            arm="mutation" if mutation_attempt else "control",
+            round_index=round_index,
+            allow_cookie_field=allow_cookie_field,
+        )
         proposed = AttemptCost(
             kind=role,
             origin_fingerprint=origin_fingerprint(context.decision.canonical_origin),
             target_fingerprint=context.decision.target_fingerprint,
             request_body_bytes=len(request.body),
-            request_bytes=estimate_semantic_request_bytes(request, context.canonical_url),
+            request_bytes=prepared.represented_bytes,
             response_bytes=min(
                 plan.experiment.max_response_bytes,
                 self.budgets.limits.maximum_response_bytes,
@@ -1025,15 +1061,12 @@ class ExperimentOracle:
                     "dns_answer_changed": context.decision.code == "AUTHORIZED_DNS_CHANGED",
                 },
             )
-            return self.transport.send(
-                request,
+            return self.transport.send_prepared(
+                prepared,
                 authorization=context,
                 lease=lease,
                 evidence=evidence,
-                arm="mutation" if arm == "mutation" else "control",
-                round_index=round_index,
                 body_storage=plan.experiment.body_storage,
-                allow_cookie_field=allow_cookie_field,
             )
         finally:
             if lease.active:

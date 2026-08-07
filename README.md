@@ -16,7 +16,7 @@
   verifiable evidence.
 </p>
 
-> **Current release: v0.4.2.** MRMA uses semantic HTTP through HTTPX. It does not claim wire-exact
+> **Current release: v0.4.3.** MRMA uses semantic HTTP through HTTPX. It does not claim wire-exact
 > replay, prove exploitability, assign severity, or identify a proprietary component from
 > black-box behavior.
 
@@ -41,7 +41,13 @@ No HTTP attempt can bypass the shared runtime sequence.
 Authorization decision
         |
         v
+Final HTTPX request preparation
+        |
+        v
 Budget reservation
+        |
+        v
+Immediate authorization revalidation
         |
         v
 Journaled attempt identity
@@ -58,17 +64,17 @@ Comparison + fixed-sample conclusion
 
 | Boundary | Enforced behavior |
 |---|---|
-| Authorization | Exact target, CIDR, method, operation kind, path, query, authority, proxy, redirect, mutation, and expiry policy |
+| Authorization | Exact ASCII host labels, target representation, CIDR, method, operation kind, path, query, authority, proxy, redirect, mutation, and expiry policy |
 | Effective authority | URL, `Host`, TLS SNI, and proxy CONNECT are checked separately; duplicate `Host` fields are rejected |
 | Redirects | Every hop is manually resolved, reauthorized, budgeted, and journaled |
 | Cross-origin state | Caller fields are deny-by-default; the final HTTPX-built request also suppresses cookie-jar and explicit `Cookie` fields unless policy explicitly allows them |
-| Budgets | Attempts, roles, redirects, retries, targets, origins, bytes, duration, depth, concurrency, and method risk use one reserve/commit ledger |
+| Budgets | The final prepared request and bounded response representation, including fields added by HTTPX, use one reserve/commit ledger with attempts, roles, redirects, retries, targets, origins, duration, depth, concurrency, and method risk |
 | Evidence | Effective plan digest, result, journal, schema, benchmark, runtime data, and bundle file digests are cross-checked offline |
 
 ## Install
 
 ```bash
-python -m pip install mrma==0.4.2
+python -m pip install mrma==0.4.3
 mrma --version
 ```
 
@@ -77,8 +83,8 @@ MRMA is tested on Python 3.10 and 3.13 across Linux, Windows, and macOS.
 The published container supports Linux AMD64 and ARM64:
 
 ```bash
-docker pull ghcr.io/0xmrma/mrma:0.4.2
-docker run --rm ghcr.io/0xmrma/mrma:0.4.2 --version
+docker pull ghcr.io/0xmrma/mrma:0.4.3
+docker run --rm ghcr.io/0xmrma/mrma:0.4.3 --version
 ```
 
 ## Start without network traffic
@@ -106,6 +112,10 @@ mrma experiment \
   --journal local-plan.journal.jsonl \
   --dry-run
 ```
+
+Dry-run output includes a local deterministic approval-plan digest. The privacy-safe plan digest in
+shared evidence remains run-local and intentionally cannot correlate private request values across
+runs.
 
 The example policy authorizes loopback only. Start a service on `127.0.0.1:8000`, then execute the
 same plan and produce a deterministic evidence bundle:
@@ -175,6 +185,8 @@ policy before networking. Exploratory output is not promoted to confirmatory evi
 
 - Semantic HTTP only. HTTPX may normalize request syntax; no wire-byte equivalence is claimed.
 - Response bodies are bounded. Truncation or comparator exhaustion becomes structured uncertainty.
+- Default comparison does not mask identifier-shaped values. Explicit normalization can support a
+  changed result, but cannot turn different complete body digests into a no-influence result.
 - Standard and strict privacy use run-local HMAC fingerprints, while selected policy and journal
   identifiers remain deterministically linkable and are declared as such.
 - The hash chain detects modification of an existing journal. It is not an author signature.

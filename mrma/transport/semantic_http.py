@@ -4,8 +4,11 @@ import hashlib
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from types import TracebackType
+from urllib.parse import urlsplit
+
+import httpx
 
 from mrma.core.http_client import (
     _GUARDED_TRANSPORT_CAPABILITY,
@@ -15,11 +18,17 @@ from mrma.core.http_client import (
 )
 from mrma.core.raw_request import RawRequest
 from mrma.evidence.journal import EvidenceContext, EvidenceJournal
-from mrma.policy.authorization import AuthorizedRequestContext, request_fingerprint
+from mrma.policy.authorization import (
+    AuthorizationError,
+    AuthorizedMutationContext,
+    AuthorizedRequestContext,
+    canonical_host_authority,
+    request_fingerprint,
+)
 from mrma.policy.budget import BudgetLease
 
-TRANSPORT_ADAPTER_VERSION = "semantic-httpx/1.0"
-SEMANTIC_REQUEST_ESTIMATE_VERSION = "semantic-request-upper-bound/1.0"
+TRANSPORT_ADAPTER_VERSION = "semantic-httpx/1.1"
+SEMANTIC_REQUEST_ESTIMATE_VERSION = "declared-request-preflight/2.0"
 _LIBRARY_REQUEST_OVERHEAD_BYTES = 2048
 
 
@@ -29,6 +38,20 @@ class TransportPolicyError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
         super().__init__(f"{code}: {message}")
+
+
+@dataclass(frozen=True)
+class PreparedSemanticRequest:
+    request: httpx.Request = field(repr=False)
+    authorization_request_fingerprint: str
+    target_fingerprint: str
+    origin_fingerprint: str
+    mutation_delta_digest: str | None
+    arm: str
+    round_index: int | None
+    request_body_bytes: int
+    represented_bytes: int
+    allow_cookie_field: bool
 
 
 class SemanticHttpAdapter:
@@ -113,6 +136,111 @@ class SemanticHttpAdapter:
             "connection_mode": self._transport.connection_mode,
         }
 
+    def approval_policy(self) -> dict[str, object]:
+        payload = self.public_policy()
+        payload.update(
+            {
+                "request_byte_accounting": "prepared-httpx-representation/1.0",
+                "proxy_endpoint_digest": (
+                    "sha256:" + hashlib.sha256(self.options.proxy.encode("utf-8")).hexdigest()
+                    if self.options.proxy is not None
+                    else None
+                ),
+                "custom_tls_context": self.options.ssl_context is not None,
+            }
+        )
+        return payload
+
+    def prepare(
+        self,
+        request: RawRequest,
+        *,
+        authorization: AuthorizedRequestContext,
+        arm: str,
+        round_index: int | None,
+        allow_cookie_field: bool = True,
+    ) -> PreparedSemanticRequest:
+        if not self._entered:
+            raise TransportPolicyError("TRANSPORT_NOT_ENTERED", "adapter context is not active")
+        normalized_arm = arm if arm in {"control", "mutation"} else "control"
+        if normalized_arm == "mutation" and not isinstance(
+            authorization, AuthorizedMutationContext
+        ):
+            raise TransportPolicyError(
+                "MUTATION_AUTHORIZATION_REQUIRED",
+                "mutation transport requires a context bound to the validated mutation delta",
+            )
+        if not authorization.decision.accepted:
+            raise TransportPolicyError("AUTHORIZATION_REQUIRED", "authorization was not accepted")
+        observed_fingerprint = request_fingerprint(request, authorization.canonical_url)
+        if observed_fingerprint != authorization.request_fingerprint:
+            raise TransportPolicyError(
+                "AUTHORIZATION_REQUEST_MISMATCH",
+                "request changed after authorization",
+            )
+        rebound = replace(request, path=authorization.canonical_url, target_form="absolute")
+        prepared = self._transport.prepare(
+            rebound,
+            authorization.canonical_url,
+            normalized_arm,
+            round_index=round_index,
+            allow_cookie_field=allow_cookie_field,
+        )
+        if prepared.method != authorization.decision.method:
+            raise TransportPolicyError("PREPARED_METHOD_MISMATCH", "HTTPX changed the method")
+        if str(prepared.url) != authorization.canonical_url:
+            raise TransportPolicyError(
+                "PREPARED_TARGET_MISMATCH",
+                "HTTPX prepared a different target than the authorized canonical URL",
+            )
+        try:
+            host_values = [
+                value.decode("ascii")
+                for name, value in prepared.headers.raw
+                if name.lower() == b"host"
+            ]
+        except UnicodeDecodeError as exc:
+            raise TransportPolicyError(
+                "PREPARED_HOST_INVALID",
+                "the prepared Host field is not ASCII",
+            ) from exc
+        if len(host_values) != 1:
+            raise TransportPolicyError(
+                "PREPARED_HOST_INVALID",
+                "the prepared request must contain exactly one Host field",
+            )
+        scheme = urlsplit(authorization.canonical_url).scheme
+        try:
+            prepared_host = canonical_host_authority(host_values[0], scheme)
+        except (AuthorizationError, ValueError) as exc:
+            raise TransportPolicyError(
+                "PREPARED_HOST_INVALID",
+                "the prepared Host field is malformed",
+            ) from exc
+        if prepared_host != authorization.effective_host_authority:
+            raise TransportPolicyError(
+                "PREPARED_HOST_MISMATCH",
+                "the prepared Host field differs from the authorized authority",
+            )
+        represented_bytes = represented_request_bytes(prepared)
+        mutation_digest = (
+            authorization.mutation.delta_digest
+            if isinstance(authorization, AuthorizedMutationContext)
+            else None
+        )
+        return PreparedSemanticRequest(
+            request=prepared,
+            authorization_request_fingerprint=authorization.request_fingerprint,
+            target_fingerprint=authorization.decision.target_fingerprint,
+            origin_fingerprint=_origin_fingerprint(authorization.decision.canonical_origin),
+            mutation_delta_digest=mutation_digest,
+            arm=normalized_arm,
+            round_index=round_index,
+            request_body_bytes=len(request.body),
+            represented_bytes=represented_bytes,
+            allow_cookie_field=allow_cookie_field,
+        )
+
     def send(
         self,
         request: RawRequest,
@@ -125,6 +253,30 @@ class SemanticHttpAdapter:
         body_storage: str,
         allow_cookie_field: bool = True,
     ) -> CapturedResponse:
+        prepared = self.prepare(
+            request,
+            authorization=authorization,
+            arm=arm,
+            round_index=round_index,
+            allow_cookie_field=allow_cookie_field,
+        )
+        return self.send_prepared(
+            prepared,
+            authorization=authorization,
+            lease=lease,
+            evidence=evidence,
+            body_storage=body_storage,
+        )
+
+    def send_prepared(
+        self,
+        prepared: PreparedSemanticRequest,
+        *,
+        authorization: AuthorizedRequestContext,
+        lease: BudgetLease,
+        evidence: EvidenceContext,
+        body_storage: str,
+    ) -> CapturedResponse:
         if not self._entered:
             raise TransportPolicyError("TRANSPORT_NOT_ENTERED", "adapter context is not active")
         if not lease.active:
@@ -135,25 +287,36 @@ class SemanticHttpAdapter:
             raise TransportPolicyError("EVIDENCE_RUN_MISMATCH", "evidence belongs to another run")
         if not authorization.decision.accepted:
             raise TransportPolicyError("AUTHORIZATION_REQUIRED", "authorization was not accepted")
-        observed_fingerprint = request_fingerprint(request, authorization.canonical_url)
-        if observed_fingerprint != authorization.request_fingerprint:
+        if prepared.authorization_request_fingerprint != authorization.request_fingerprint:
             raise TransportPolicyError(
                 "AUTHORIZATION_REQUEST_MISMATCH",
-                "request changed after authorization",
+                "prepared request belongs to another authorization context",
             )
-        if lease.proposed.target_fingerprint != authorization.decision.target_fingerprint:
-            raise TransportPolicyError("LEASE_TARGET_MISMATCH", "lease belongs to another target")
-        if lease.proposed.origin_fingerprint != _origin_fingerprint(
-            authorization.decision.canonical_origin
+        if prepared.target_fingerprint != authorization.decision.target_fingerprint or (
+            lease.proposed.target_fingerprint != authorization.decision.target_fingerprint
         ):
+            raise TransportPolicyError("LEASE_TARGET_MISMATCH", "lease belongs to another target")
+        if prepared.origin_fingerprint != _origin_fingerprint(
+            authorization.decision.canonical_origin
+        ) or lease.proposed.origin_fingerprint != prepared.origin_fingerprint:
             raise TransportPolicyError("LEASE_ORIGIN_MISMATCH", "lease belongs to another origin")
-        if len(request.body) > lease.proposed.request_body_bytes:
+        if prepared.request_body_bytes > lease.proposed.request_body_bytes:
             raise TransportPolicyError("LEASE_SEND_OVERRUN", "request body exceeds reservation")
-        request_bytes = estimate_semantic_request_bytes(request, authorization.canonical_url)
-        if request_bytes > lease.proposed.request_bytes:
+        if prepared.represented_bytes > lease.proposed.request_bytes:
             raise TransportPolicyError(
-                "LEASE_SEND_OVERRUN", "semantic request estimate exceeds reservation"
+                "LEASE_SEND_OVERRUN", "prepared request representation exceeds reservation"
             )
+        if prepared.arm == "mutation":
+            if not isinstance(authorization, AuthorizedMutationContext):
+                raise TransportPolicyError(
+                    "MUTATION_AUTHORIZATION_REQUIRED",
+                    "mutation transport requires a validated mutation context",
+                )
+            if prepared.mutation_delta_digest != authorization.mutation.delta_digest:
+                raise TransportPolicyError(
+                    "MUTATION_AUTHORIZATION_MISMATCH",
+                    "prepared request belongs to another mutation delta",
+                )
 
         self.journal.record(
             "ATTEMPT_STARTED",
@@ -173,26 +336,25 @@ class SemanticHttpAdapter:
                 "transport_adapter": TRANSPORT_ADAPTER_VERSION,
                 "redirects_followed_by_adapter": False,
                 "state_field_forwarding": (
-                    "allowed" if allow_cookie_field else "suppressed"
+                    "allowed" if prepared.allow_cookie_field else "suppressed"
                 ),
+                "request_representation_bytes": prepared.represented_bytes,
+                "mutation_delta_digest": prepared.mutation_delta_digest,
             },
         )
         started = time.perf_counter()
-        rebound = replace(request, path=authorization.canonical_url, target_form="absolute")
         try:
-            response = self._transport.capture(
-                rebound,
-                authorization.canonical_url,
-                arm if arm in {"control", "mutation"} else "control",
+            response = self._transport.capture_prepared(
+                prepared.request,
+                prepared.arm,
                 max_response_bytes=lease.response_allowance,
                 body_storage=body_storage,
-                round_index=round_index,
-                allow_cookie_field=allow_cookie_field,
+                round_index=prepared.round_index,
             )
         except Exception as exc:
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             lease.commit(
-                bytes_sent=request_bytes,
+                bytes_sent=prepared.represented_bytes,
                 bytes_received=0,
                 duration_ms=elapsed_ms,
             )
@@ -208,9 +370,13 @@ class SemanticHttpAdapter:
             )
             raise
         elapsed_ms = int((time.perf_counter() - started) * 1000)
-        charged_received = min(response.body_length, lease.response_allowance)
+        charged_received = min(response.represented_bytes, lease.response_allowance)
+        charged_body = max(
+            0,
+            charged_received - min(response.response_head_bytes, charged_received),
+        )
         lease.commit(
-            bytes_sent=request_bytes,
+            bytes_sent=prepared.represented_bytes,
             bytes_received=charged_received,
             duration_ms=elapsed_ms,
         )
@@ -221,7 +387,9 @@ class SemanticHttpAdapter:
                 "attempt_id": evidence.attempt_id,
                 "outcome": "policy-abort" if response.response_limit_exceeded else "http-response",
                 "status": response.status_code,
-                "body_bytes_charged": charged_received,
+                "body_bytes_charged": charged_body,
+                "response_representation_bytes_observed": response.represented_bytes,
+                "response_representation_bytes_charged": charged_received,
                 "body_digest_complete": response.body_digest_complete,
                 "duration_ms": elapsed_ms,
                 "negotiated_http_version": response.http_version,
@@ -253,3 +421,18 @@ def estimate_semantic_request_bytes(request: RawRequest, canonical_url: str) -> 
         for name, value in request.headers
     )
     return request_line + fields + 2 + len(request.body) + _LIBRARY_REQUEST_OVERHEAD_BYTES
+
+
+def represented_request_bytes(request: httpx.Request) -> int:
+    """Measure the final HTTPX request representation that will be sent."""
+    request_target = request.url.raw_path
+    request_line = (
+        len(request.method.encode("ascii"))
+        + 1
+        + len(request_target)
+        + 1
+        + len(b"HTTP/1.1")
+        + 2
+    )
+    fields = sum(len(name) + 2 + len(value) + 2 for name, value in request.headers.raw)
+    return request_line + fields + 2 + len(request.content)

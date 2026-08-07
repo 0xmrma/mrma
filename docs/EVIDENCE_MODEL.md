@@ -26,6 +26,11 @@ HTTP, false durable claims, false complete header coverage, and no-influence con
 comparison failure. Verification recomputes the v2 effective-plan digest from its canonical
 document. Published experiment schemas v2 through v8 are byte-locked by tests.
 
+The evidence plan digest uses run-local fingerprints and is intended for bundle integrity, not
+cross-run approval. Dry-run output separately exposes a deterministic local approval-plan digest
+that binds exact request values, privacy mode, authorization digest, comparison policy, and selected
+transport policy. The approval digest is excluded from journals and shared v8 evidence.
+
 ## Partial results
 
 Keyboard interruption, cancellation, authorization rejection, budget exhaustion, transport/policy

@@ -2,7 +2,7 @@
 
 ## Exact claim
 
-MRMA v0.4.2 is an authorization-enforcing, budgeted, recoverable HTTP trust-influence research
+MRMA v0.4.3 is an authorization-enforcing, budgeted, recoverable HTTP trust-influence
 tool. It uses semantic HTTP replay and fixed-sample differential experiments.
 
 ## Non-claims
