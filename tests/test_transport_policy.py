@@ -18,6 +18,7 @@ from mrma.policy.budget import AttemptCost, BudgetLedger, BudgetLimits
 from mrma.transport.semantic_http import (
     SemanticHttpAdapter,
     TransportPolicyError,
+    _fingerprintable_extension_value,
     estimate_semantic_request_bytes,
     origin_fingerprint,
 )
@@ -71,6 +72,28 @@ def test_adapter_normalizes_redirect_policy_and_context_lifecycle():
     with pytest.raises(TransportPolicyError, match="TRANSPORT_NOT_ENTERED"):
         with adapter.observation_session(arm="control", round_index=1):
             pass
+
+
+def test_adapter_requires_one_active_observation_for_preparation(
+    authorization_payload,
+    write_authorization,
+):
+    request, context, journal, _ledger, _evidence, _cost = _components(
+        authorization_payload, write_authorization
+    )
+    adapter = SemanticHttpAdapter(SendOptions(trust_env=False), journal=journal)
+    with adapter:
+        with pytest.raises(TransportPolicyError, match="OBSERVATION_SESSION_REQUIRED"):
+            adapter.prepare(
+                request,
+                authorization=context,
+                arm="control",
+                round_index=1,
+            )
+        with adapter.observation_session(arm="control", round_index=1):
+            with pytest.raises(TransportPolicyError, match="OBSERVATION_SESSION_NESTED"):
+                with adapter.observation_session(arm="control", round_index=1):
+                    pass
 
 
 @pytest.mark.parametrize(
@@ -380,7 +403,290 @@ def test_prepared_request_accounts_for_cookie_jar_fields(
         request,
         context.canonical_url,
     )
-    assert any(name.lower() == b"cookie" for name, _value in prepared.request.headers.raw)
+    assert not hasattr(prepared, "request")
+    assert any(name.lower() == b"cookie" for name, _value in prepared._request.headers.raw)
+
+
+@pytest.mark.parametrize("variant", ["method", "url", "host", "stream", "extensions"])
+def test_prepared_request_capability_rejects_post_authorization_mutation(
+    authorization_payload,
+    write_authorization,
+    monkeypatch,
+    variant: str,
+):
+    request, context, journal, ledger, evidence, cost = _components(
+        authorization_payload, write_authorization
+    )
+    adapter = SemanticHttpAdapter(SendOptions(trust_env=False), journal=journal)
+    capture_called = False
+
+    def capture(*_args, **_kwargs):
+        nonlocal capture_called
+        capture_called = True
+        raise AssertionError("mutated prepared request reached the network adapter")
+
+    monkeypatch.setattr(adapter._transport, "capture_prepared", capture)
+    with adapter, adapter.observation_session(arm="control", round_index=1):
+        prepared = adapter.prepare(
+            request,
+            authorization=context,
+            arm="control",
+            round_index=1,
+        )
+        raw = prepared._request
+        if variant == "method":
+            raw.method = "POST"
+        elif variant == "url":
+            raw.url = httpx.URL("http://other.test/")
+        elif variant == "host":
+            raw.headers["Host"] = "other.test"
+        elif variant == "stream":
+            raw.stream = httpx.ByteStream(b"changed")
+        else:
+            raw.extensions["sni_hostname"] = "other.test"
+        lease = ledger.reserve(
+            replace(cost, request_bytes=prepared.represented_bytes),
+            evidence=evidence,
+        )
+        with pytest.raises(TransportPolicyError, match="PREPARED_REQUEST_MUTATED"):
+            adapter.send_prepared(
+                prepared,
+                authorization=context,
+                lease=lease,
+                evidence=evidence,
+                body_storage="full",
+            )
+        lease.release()
+
+    assert capture_called is False
+    assert all(event.event_type != "ATTEMPT_STARTED" for event in journal.events)
+
+
+def test_send_prepared_rejects_non_capability(
+    authorization_payload,
+    write_authorization,
+):
+    _request, context, journal, ledger, evidence, cost = _components(
+        authorization_payload, write_authorization
+    )
+    adapter = SemanticHttpAdapter(SendOptions(trust_env=False), journal=journal)
+    lease = ledger.reserve(cost, evidence=evidence)
+    with adapter, adapter.observation_session(arm="control", round_index=1):
+        with pytest.raises(TransportPolicyError, match="PREPARED_CAPABILITY_INVALID"):
+            adapter.send_prepared(
+                object(),  # type: ignore[arg-type]
+                authorization=context,
+                lease=lease,
+                evidence=evidence,
+                body_storage="full",
+            )
+    lease.release()
+
+
+def test_prepare_rejects_mismatched_buffered_content_and_send_stream(
+    authorization_payload,
+    write_authorization,
+    monkeypatch,
+):
+    request, context, journal, _ledger, _evidence, _cost = _components(
+        authorization_payload, write_authorization
+    )
+    adapter = SemanticHttpAdapter(SendOptions(trust_env=False), journal=journal)
+
+    def mismatched_request(*_args, **_kwargs) -> httpx.Request:
+        prepared = httpx.Request("GET", context.canonical_url, headers={"Host": "example.test"})
+        prepared.stream = httpx.ByteStream(b"not-the-buffered-content")
+        return prepared
+
+    monkeypatch.setattr(adapter._transport, "prepare", mismatched_request)
+    with adapter, adapter.observation_session(arm="control", round_index=1):
+        with pytest.raises(TransportPolicyError, match="PREPARED_REQUEST_INVALID"):
+            adapter.prepare(
+                request,
+                authorization=context,
+                arm="control",
+                round_index=1,
+            )
+
+
+def test_prepared_capability_seal_rejects_metadata_changes(
+    authorization_payload,
+    write_authorization,
+):
+    request, context, journal, ledger, evidence, cost = _components(
+        authorization_payload, write_authorization
+    )
+    adapter = SemanticHttpAdapter(SendOptions(trust_env=False), journal=journal)
+    with adapter, adapter.observation_session(arm="control", round_index=1):
+        prepared = adapter.prepare(
+            request,
+            authorization=context,
+            arm="control",
+            round_index=1,
+        )
+        altered = replace(prepared, represented_bytes=prepared.represented_bytes + 1)
+        lease = ledger.reserve(
+            replace(cost, request_bytes=altered.represented_bytes),
+            evidence=evidence,
+        )
+        with pytest.raises(TransportPolicyError, match="PREPARED_CAPABILITY_INVALID"):
+            adapter.send_prepared(
+                altered,
+                authorization=context,
+                lease=lease,
+                evidence=evidence,
+                body_storage="full",
+            )
+        lease.release()
+
+    other_adapter = SemanticHttpAdapter(SendOptions(trust_env=False), journal=journal)
+    other_evidence = replace(evidence, attempt_id="other-adapter")
+    with other_adapter, other_adapter.observation_session(arm="control", round_index=1):
+        other_lease = ledger.reserve(
+            replace(cost, request_bytes=prepared.represented_bytes),
+            evidence=other_evidence,
+        )
+        with pytest.raises(TransportPolicyError, match="PREPARED_CAPABILITY_INVALID"):
+            other_adapter.send_prepared(
+                prepared,
+                authorization=context,
+                lease=other_lease,
+                evidence=other_evidence,
+                body_storage="full",
+            )
+        other_lease.release()
+
+
+def test_prepared_capability_is_bound_to_its_observation_session(
+    authorization_payload,
+    write_authorization,
+    monkeypatch,
+):
+    request, context, journal, ledger, evidence, cost = _components(
+        authorization_payload, write_authorization
+    )
+    adapter = SemanticHttpAdapter(SendOptions(trust_env=False), journal=journal)
+    with adapter:
+        with adapter.observation_session(arm="control", round_index=1):
+            prepared = adapter.prepare(
+                request,
+                authorization=context,
+                arm="control",
+                round_index=1,
+            )
+
+        monkeypatch.setattr(
+            adapter._transport,
+            "capture_prepared",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("stale capability reached the network adapter")
+            ),
+        )
+        with adapter.observation_session(arm="control", round_index=1):
+            lease = ledger.reserve(
+                replace(cost, request_bytes=prepared.represented_bytes),
+                evidence=evidence,
+            )
+            with pytest.raises(TransportPolicyError, match="PREPARED_OBSERVATION_MISMATCH"):
+                adapter.send_prepared(
+                    prepared,
+                    authorization=context,
+                    lease=lease,
+                    evidence=evidence,
+                    body_storage="full",
+                )
+            lease.release()
+
+
+def test_prepared_capability_is_single_use(
+    authorization_payload,
+    write_authorization,
+    monkeypatch,
+):
+    request, context, journal, ledger, evidence, cost = _components(
+        authorization_payload, write_authorization
+    )
+    response = CapturedResponse(
+        status_code=200,
+        headers=(),
+        content=b"",
+        body_length=0,
+        body_sha256="0" * 64,
+        body_digest_complete=True,
+        body_retained_complete=True,
+        response_limit_exceeded=False,
+        redirect_chain=(),
+        final_origin="http://example.test:80",
+        represented_bytes=19,
+        response_head_bytes=19,
+    )
+    adapter = SemanticHttpAdapter(SendOptions(trust_env=False), journal=journal)
+    monkeypatch.setattr(adapter._transport, "capture_prepared", lambda *_args, **_kwargs: response)
+    with adapter, adapter.observation_session(arm="control", round_index=1):
+        prepared = adapter.prepare(
+            request,
+            authorization=context,
+            arm="control",
+            round_index=1,
+        )
+        exact_cost = replace(cost, request_bytes=prepared.represented_bytes)
+        first_lease = ledger.reserve(exact_cost, evidence=evidence)
+        adapter.send_prepared(
+            prepared,
+            authorization=context,
+            lease=first_lease,
+            evidence=evidence,
+            body_storage="full",
+        )
+        second_evidence = replace(evidence, attempt_id="a2")
+        second_lease = ledger.reserve(exact_cost, evidence=second_evidence)
+        with pytest.raises(TransportPolicyError, match="PREPARED_CAPABILITY_CONSUMED"):
+            adapter.send_prepared(
+                prepared,
+                authorization=context,
+                lease=second_lease,
+                evidence=second_evidence,
+                body_storage="full",
+            )
+        second_lease.release()
+
+
+def test_mutation_event_fingerprints_are_adapter_local():
+    first = SemanticHttpAdapter(
+        SendOptions(trust_env=False),
+        journal=EvidenceJournal(run_id="first"),
+    )
+    second = SemanticHttpAdapter(
+        SendOptions(trust_env=False),
+        journal=EvidenceJournal(run_id="second"),
+    )
+    delta = "sha256:" + "1" * 64
+    first_fingerprint = first._mutation_event_fingerprint(delta)
+    second_fingerprint = second._mutation_event_fingerprint(delta)
+    assert first_fingerprint is not None
+    assert first_fingerprint.startswith("hmac-sha256:")
+    assert first_fingerprint != second_fingerprint
+
+
+def test_prepared_extension_fingerprint_is_typed_and_bounded():
+    assert _fingerprintable_extension_value([b"x", 1]) == [
+        {"bytes_hex": "78"},
+        1,
+    ]
+    for value, message in (
+        (float("nan"), "non-finite"),
+        ({1: "invalid"}, "bounded string keys"),
+        ([0] * 65, "item limit"),
+        (object(), "not fingerprintable"),
+    ):
+        with pytest.raises((TypeError, ValueError), match=message):
+            _fingerprintable_extension_value(value)
+
+    nested: object = 0
+    for _ in range(10):
+        nested = [nested]
+    with pytest.raises(ValueError, match="nesting limit"):
+        _fingerprintable_extension_value(nested)
 
 
 def test_response_budget_charges_headers_and_body(

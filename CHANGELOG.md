@@ -3,6 +3,39 @@
 All notable changes are documented here. MRMA follows semantic versioning for the CLI and uses an
 independent version in each machine-readable evidence schema.
 
+## 0.4.4 - 2026-08-07
+
+### Prepared Request Boundary
+
+- Replace the public raw HTTPX request field with an opaque prepared capability that preserves the
+  existing import name while exposing only reservation metadata. An adapter-local HMAC seal binds
+  request identity, authorization identity, mutation delta, arm, round, and accounting values.
+- Recompute the final method, URL, ordered raw fields, buffered content and send stream, extensions,
+  effective `Host`, and represented size immediately before network I/O. Mutation, malformed
+  buffering, cross-adapter use, and capability metadata changes fail before `ATTEMPT_STARTED`.
+- Require the buffered content and actual HTTPX send stream to have identical lengths and digests
+  before a request can be reserved.
+- Bind each prepared capability to one observation session and consume it before the network call,
+  preventing stale-session and repeated-lease replay.
+
+### Mutation And Evidence Precision
+
+- Enforce one-dimensional header experiments: method, target, declared HTTP version, target form,
+  and body must remain identical. Unsupported mutation families fail closed instead of receiving a
+  generic fingerprint binding, while unchanged exploratory control sends remain valid.
+- Add `changed_dimensions` to mutation validation and bind it into the deterministic local delta
+  digest under `authorization-policy/2.1`.
+- Replace deterministic mutation-delta values in journals with adapter-local HMAC fingerprints and
+  declare those identifiers as run-local in v8 evidence without changing the frozen schema.
+
+### Validation And Governance
+
+- Synchronize architecture, budget, API, evidence, and validation documentation with the
+  prepare-reserve-revalidate-send capability boundary.
+- Require the `semantic-mutation` and `benchmark` jobs in the protected `main` ruleset alongside the
+  existing matrix, audit, distribution, container, evidence-quality, and CodeQL checks.
+- Expand the suite to 348 tests and the committed critical-policy catalog to 39 mutants, all killed.
+
 ## 0.4.3 - 2026-08-07
 
 ### Authorization Precision

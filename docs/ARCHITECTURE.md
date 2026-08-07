@@ -2,7 +2,7 @@
 
 ## Product boundary
 
-MRMA v0.4.3 has one confirmatory engine and one shared network policy kernel. The CLI parses input,
+MRMA v0.4.4 has one confirmatory engine and one shared network policy kernel. The CLI parses input,
 selects workflow policy, and renders output. It does not own transport authorization decisions.
 
 ```text
@@ -14,7 +14,9 @@ ExperimentPlan + ComparisonPolicy
         v
 ExperimentOracle
   | authorization -> AuthorizedRequestContext
-  | budget        -> BudgetLease
+  | prepare       -> opaque, adapter-sealed request capability
+  | budget        -> BudgetLease for the prepared representation
+  | revalidate    -> authorization + prepared capability
   | journal       -> EvidenceContext
         |
         v
@@ -26,10 +28,19 @@ CapturedResponse -> experiment analysis -> v8 evidence -> bundle
 
 ## Enforced boundaries
 
-`SemanticHttpAdapter.send()` requires all three unforgeable-in-normal-use capability objects:
-an accepted `AuthorizedRequestContext`, an active `BudgetLease`, and an `EvidenceContext`. The
-adapter revalidates context identity, records `ATTEMPT_STARTED`, performs one semantic HTTP
-attempt, commits actual bounded cost, and records completion. It cannot be called with only a URL.
+`SemanticHttpAdapter.prepare()` builds the final HTTPX request and returns an opaque capability with
+safe accounting metadata; the mutable HTTPX object is not exported. The capability is sealed with
+an adapter-local key over the authorization identity, arm, round, accounting values, mutation
+delta, and a digest of the final method, URL, ordered raw fields, buffered content and stream,
+extensions, effective `Host`, and represented size.
+
+`SemanticHttpAdapter.send_prepared()` requires that capability plus an accepted
+`AuthorizedRequestContext`, active `BudgetLease`, and matching `EvidenceContext`. Immediately before
+network I/O it recomputes the request digest, verifies the adapter seal, repeats method/URL/`Host`
+authorization checks, and compares actual body and representation sizes with the reservation. A
+changed, stale-session, or already-consumed capability fails before `ATTEMPT_STARTED`. `send()` is
+the single-call convenience path through the same prepare and send-prepared boundary; neither
+method can be called with only a URL.
 
 `ExperimentOracle` owns retries, redirect traversal, setup/reset hooks, schedules, observations,
 and partial-run conversion. One observation session owns redirect/retry cookie state and its
@@ -41,7 +52,8 @@ HTTPX-built request so eligible cookie-jar state cannot bypass raw-field filteri
 
 - `mrma.engine`: typed plan and confirmatory oracle.
 - `mrma.policy`: authorization, budgets, comparison, method risk, and protocol interfaces.
-- `mrma.transport`: semantic HTTP adapter and request-byte estimator.
+- `mrma.transport`: semantic HTTP adapter, opaque prepared capability, and request-byte estimator.
+  The capability preserves the public type name but does not expose a public HTTPX request field.
 - `mrma.evidence`: append-only journal, v8 model, schema validation, bundles, and verification.
 - `mrma.workflows`: candidate manifests and guarded legacy exploratory dispatch.
 - `mrma.core`: comparison, statistical experiment, HTTP semantics, request model, and retained

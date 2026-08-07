@@ -94,6 +94,22 @@ MUTATIONS = (
         ),
     ),
     Mutation(
+        "AUTH-HEADER-DIMENSION",
+        "mrma/policy/authorization.py",
+        "if non_header_dimensions:",
+        "if False:",
+        ("tests/test_authorization.py::test_header_mutation_rejects_non_header_dimensions",),
+    ),
+    Mutation(
+        "AUTH-UNSUPPORTED-FAMILY",
+        "mrma/policy/authorization.py",
+        'if mutation_family != "header":\n            raise AuthorizationError(\n                "UNSUPPORTED_MUTATION_FAMILY",\n                f"mutation family {mutation_family!r} has no dimensional validator",\n            )',
+        'if False:\n            raise AssertionError("unreachable")',
+        (
+            "tests/test_authorization.py::test_mutation_validation_allows_empty_control_and_rejects_unsupported_family",
+        ),
+    ),
+    Mutation(
         "AUTH-REPETITION-BOUNDARY",
         "mrma/policy/authorization.py",
         "repetitions > maximum_repetitions",
@@ -214,9 +230,52 @@ MUTATIONS = (
     Mutation(
         "TRANSPORT-PREPARED-BYTES",
         "mrma/transport/semantic_http.py",
-        "if prepared.represented_bytes > lease.proposed.request_bytes:",
+        "if current_represented_bytes > lease.proposed.request_bytes:",
         "if False:",
         ("tests/test_transport_policy.py::test_transport_rejects_missing_or_mismatched_policy_contexts",),
+    ),
+    Mutation(
+        "TRANSPORT-PREPARED-DIGEST",
+        "mrma/transport/semantic_http.py",
+        "if not hmac.compare_digest(current_request_digest, prepared.prepared_request_digest):",
+        "if False:",
+        (
+            "tests/test_transport_policy.py::test_prepared_request_capability_rejects_post_authorization_mutation",
+        ),
+    ),
+    Mutation(
+        "TRANSPORT-CONTENT-STREAM",
+        "mrma/transport/semantic_http.py",
+        "if stream_length != len(body) or not hmac.compare_digest(\n        stream_digest.hexdigest(),\n        content_digest,\n    ):",
+        "if False:",
+        (
+            "tests/test_transport_policy.py::test_prepare_rejects_mismatched_buffered_content_and_send_stream",
+        ),
+    ),
+    Mutation(
+        "TRANSPORT-CAPABILITY-SEAL",
+        "mrma/transport/semantic_http.py",
+        "if not hmac.compare_digest(\n            self._seal_capability(capability_values),\n            prepared.capability_seal,\n        ):",
+        "if False:",
+        (
+            "tests/test_transport_policy.py::test_prepared_capability_seal_rejects_metadata_changes",
+        ),
+    ),
+    Mutation(
+        "TRANSPORT-OBSERVATION-BINDING",
+        "mrma/transport/semantic_http.py",
+        "if prepared._observation_token != self._active_observation_token:",
+        "if False:",
+        (
+            "tests/test_transport_policy.py::test_prepared_capability_is_bound_to_its_observation_session",
+        ),
+    ),
+    Mutation(
+        "TRANSPORT-CAPABILITY-SINGLE-USE",
+        "mrma/transport/semantic_http.py",
+        "if prepared._capability_id in self._consumed_capabilities:",
+        "if False:",
+        ("tests/test_transport_policy.py::test_prepared_capability_is_single_use",),
     ),
     Mutation(
         "TRANSPORT-RESPONSE-HEADERS",

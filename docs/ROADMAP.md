@@ -112,7 +112,16 @@ adding more mutation families.
 - [x] Add a deterministic local approval-plan digest without exposing it in shared evidence
 - [x] Disable new v7 generation while retaining verification of existing v7 documents
 
-Version 0.4.3 is the maintained 0.4 baseline. The items below are optional research directions,
+## 0.4.4 - SDK boundary freeze
+
+- [x] Seal prepared HTTPX request identity and capability metadata; bind capabilities to one session
+- [x] Recompute request, stream, extension, authority, and accounting identity before send
+- [x] Restrict header experiments to header-only deltas and reject unsupported families
+- [x] Make journal mutation-delta identifiers run-local
+- [x] Require benchmark and semantic-mutation checks on protected `main`
+- [x] Synchronize SDK, architecture, budget, evidence, and validation contracts
+
+Version 0.4.4 is the maintained 0.4 baseline. The items below are optional research directions,
 not commitments or current product claims.
 
 ## Possible 0.5 - Product-wide evidence oracle

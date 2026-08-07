@@ -326,6 +326,22 @@ def test_v8_evidence_is_strict_and_schema_valid(
     assert document["transport"]["wire_exact"] is False
     assert document["journal"]["event_count"] > 0
     assert document["privacy"]["fingerprint_policy"]["cross_run_correlation"] == "partial"
+    assert (
+        "journal mutation-delta identifiers"
+        in document["privacy"]["fingerprint_policy"]["run_local_hmac_fields"]
+    )
+    mutation_attempts = [
+        event
+        for event in journal.events
+        if event.event_type == "ATTEMPT_STARTED"
+        and event.data.get("mutation_delta_fingerprint") is not None
+    ]
+    assert mutation_attempts
+    assert all(
+        str(event.data["mutation_delta_fingerprint"]).startswith("hmac-sha256:")
+        for event in mutation_attempts
+    )
+    assert all("mutation_delta_digest" not in event.data for event in mutation_attempts)
     assert any(
         item["code"] == "CROSS_RUN_POLICY_LINKABILITY"
         for item in document["limitations"]
@@ -719,6 +735,7 @@ def test_dry_run_rejects_plans_that_exceed_policy_capacity(
         experiment_plan = replace(
             experiment_plan,
             baseline=replace(experiment_plan.baseline, body=plan_change["body"]),
+            mutation=replace(experiment_plan.mutation, body=plan_change["body"]),
         )
     if "mutation_risk_class" in plan_change:
         experiment_plan = replace(

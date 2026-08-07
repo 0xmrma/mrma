@@ -634,6 +634,7 @@ def test_header_mutation_authorization_accounts_for_duplicate_operations(
     mutation.headers.extend([("X-Probe", "b"), ("X-Probe", "c")])
 
     validation = guarded.validate_mutation(baseline, mutation, mutation_family="header")
+    assert validation.changed_dimensions == ("headers",)
     assert validation.required_operations == ("x-probe:add", "x-probe:replace")
     context = guarded.authorize_mutation(
         baseline,
@@ -678,6 +679,54 @@ def test_header_mutation_reordering_fails_closed(
 
     with pytest.raises(AuthorizationError, match="HEADER_MUTATION_REORDER_NOT_AUTHORIZED"):
         guarded.validate_mutation(baseline, mutation, mutation_family="header")
+
+
+@pytest.mark.parametrize(
+    "dimension",
+    ["method", "target", "http_version", "target_form", "body"],
+)
+def test_header_mutation_rejects_non_header_dimensions(
+    authorization_payload,
+    write_authorization,
+    dimension: str,
+):
+    guarded = policy(authorization_v2(authorization_payload), write_authorization)
+    baseline = request()
+    mutation = request()
+    mutation.headers.append(("X-Probe", "1"))
+    if dimension == "method":
+        mutation.method = "POST"
+    elif dimension == "target":
+        mutation.path = "/other"
+    elif dimension == "http_version":
+        mutation.http_version = "HTTP/1.0"
+    elif dimension == "target_form":
+        mutation.target_form = "absolute"
+    else:
+        mutation.body = b"changed"
+
+    with pytest.raises(
+        AuthorizationError,
+        match=f"MUTATION_DIMENSION_NOT_AUTHORIZED.*{dimension}",
+    ):
+        guarded.validate_mutation(baseline, mutation, mutation_family="header")
+
+
+def test_mutation_validation_allows_empty_control_and_rejects_unsupported_family(
+    authorization_payload,
+    write_authorization,
+):
+    guarded = policy(authorization_v2(authorization_payload), write_authorization)
+    baseline = request()
+    unchanged = guarded.validate_mutation(baseline, request(), mutation_family="header")
+    assert unchanged.changed_dimensions == ()
+    assert unchanged.required_operations == ()
+    with pytest.raises(AuthorizationError, match="UNSUPPORTED_MUTATION_FAMILY"):
+        guarded.validate_mutation(
+            baseline,
+            request(body=b"changed"),
+            mutation_family="body",
+        )
 
 
 def test_mutation_context_rejects_unvalidated_outgoing_changes(

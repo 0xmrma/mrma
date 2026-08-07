@@ -16,7 +16,7 @@
   verifiable evidence.
 </p>
 
-> **Current release: v0.4.3.** MRMA uses semantic HTTP through HTTPX. It does not claim wire-exact
+> **Current release: v0.4.4.** MRMA uses semantic HTTP through HTTPX. It does not claim wire-exact
 > replay, prove exploitability, assign severity, or identify a proprietary component from
 > black-box behavior.
 
@@ -74,7 +74,7 @@ Comparison + fixed-sample conclusion
 ## Install
 
 ```bash
-python -m pip install mrma==0.4.3
+python -m pip install mrma==0.4.4
 mrma --version
 ```
 
@@ -83,8 +83,8 @@ MRMA is tested on Python 3.10 and 3.13 across Linux, Windows, and macOS.
 The published container supports Linux AMD64 and ARM64:
 
 ```bash
-docker pull ghcr.io/0xmrma/mrma:0.4.3
-docker run --rm ghcr.io/0xmrma/mrma:0.4.3 --version
+docker pull ghcr.io/0xmrma/mrma:0.4.4
+docker run --rm ghcr.io/0xmrma/mrma:0.4.4 --version
 ```
 
 ## Start without network traffic

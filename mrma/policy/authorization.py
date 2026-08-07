@@ -23,7 +23,7 @@ AUTHORIZATION_SCHEMA_VERSION = "mrma.authorization/v2"
 SUPPORTED_AUTHORIZATION_SCHEMAS = frozenset(
     {"mrma.authorization/v1", AUTHORIZATION_SCHEMA_VERSION}
 )
-AUTHORIZATION_POLICY_VERSION = "authorization-policy/2.0"
+AUTHORIZATION_POLICY_VERSION = "authorization-policy/2.1"
 
 Resolver = Callable[[str, int], Sequence[str]]
 _HTTP_METHOD = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
@@ -340,6 +340,7 @@ class MutationValidation:
     mutation_fingerprint: str
     delta_digest: str
     required_operations: tuple[str, ...]
+    changed_dimensions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -985,6 +986,21 @@ def _raw_request_fingerprint(request: RawRequest) -> str:
     return "sha256:" + hashlib.sha256(_canonical_json(payload)).hexdigest()
 
 
+def _changed_request_dimensions(
+    baseline: RawRequest,
+    mutation: RawRequest,
+) -> tuple[str, ...]:
+    dimensions = (
+        ("method", baseline.method, mutation.method),
+        ("target", baseline.path, mutation.path),
+        ("http_version", baseline.http_version, mutation.http_version),
+        ("target_form", baseline.target_form, mutation.target_form),
+        ("headers", baseline.headers, mutation.headers),
+        ("body", baseline.body, mutation.body),
+    )
+    return tuple(name for name, before, after in dimensions if before != after)
+
+
 def _header_operations(old_values: list[str], new_values: list[str]) -> tuple[str, ...]:
     if old_values == new_values:
         return ()
@@ -1123,9 +1139,29 @@ class ManifestAuthorizationPolicy:
         *,
         mutation_family: str,
     ) -> MutationValidation:
+        if mutation_family != "header":
+            raise AuthorizationError(
+                "UNSUPPORTED_MUTATION_FAMILY",
+                f"mutation family {mutation_family!r} has no dimensional validator",
+            )
+        changed_dimensions = _changed_request_dimensions(baseline, mutation)
+        non_header_dimensions = tuple(
+            dimension for dimension in changed_dimensions if dimension != "headers"
+        )
+        if non_header_dimensions:
+            raise AuthorizationError(
+                "MUTATION_DIMENSION_NOT_AUTHORIZED",
+                "header mutation also changed " + ", ".join(non_header_dimensions),
+            )
         required: list[str] = []
-        if mutation_family != "header" or self.manifest.header_mutations is None:
-            return self._mutation_validation(baseline, mutation, mutation_family, required)
+        if self.manifest.header_mutations is None:
+            return self._mutation_validation(
+                baseline,
+                mutation,
+                mutation_family,
+                changed_dimensions,
+                required,
+            )
         policy = self.manifest.header_mutations
         before: dict[str, list[str]] = {}
         after: dict[str, list[str]] = {}
@@ -1172,13 +1208,20 @@ class ManifestAuthorizationPolicy:
                 raise AuthorizationError(
                     "HOST_MUTATION_NOT_AUTHORIZED", "Host mutation requires explicit authorization"
                 )
-        return self._mutation_validation(baseline, mutation, mutation_family, required)
+        return self._mutation_validation(
+            baseline,
+            mutation,
+            mutation_family,
+            changed_dimensions,
+            required,
+        )
 
     def _mutation_validation(
         self,
         baseline: RawRequest,
         mutation: RawRequest,
         family: str,
+        changed_dimensions: tuple[str, ...],
         required_operations: list[str],
     ) -> MutationValidation:
         baseline_fingerprint = _raw_request_fingerprint(baseline)
@@ -1187,12 +1230,14 @@ class ManifestAuthorizationPolicy:
             "policy_version": AUTHORIZATION_POLICY_VERSION,
             "manifest_digest": self.manifest.digest,
             "family": family,
+            "changed_dimensions": list(changed_dimensions),
             "baseline_fingerprint": baseline_fingerprint,
             "mutation_fingerprint": mutation_fingerprint,
             "required_operations": sorted(required_operations),
         }
         return MutationValidation(
             family=family,
+            changed_dimensions=changed_dimensions,
             baseline_fingerprint=baseline_fingerprint,
             mutation_fingerprint=mutation_fingerprint,
             delta_digest="sha256:" + hashlib.sha256(_canonical_json(payload)).hexdigest(),
@@ -1386,6 +1431,11 @@ class ManifestAuthorizationPolicy:
         )
         if mutation_family is not None and mutation_family not in self.manifest.mutation_families:
             raise AuthorizationError("MUTATION_FAMILY_NOT_AUTHORIZED", "mutation family is outside policy")
+        if mutation_family is not None and mutation_family != "header":
+            raise AuthorizationError(
+                "UNSUPPORTED_MUTATION_FAMILY",
+                f"mutation family {mutation_family!r} has no dimensional validator",
+            )
         if effective_risk not in self.manifest.mutation_risk_classes:
             raise AuthorizationError("MUTATION_RISK_NOT_AUTHORIZED", "risk class is outside policy")
 

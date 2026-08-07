@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
+import json
+import math
+import secrets
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from types import TracebackType
-from urllib.parse import urlsplit
 
 import httpx
 
@@ -27,7 +30,7 @@ from mrma.policy.authorization import (
 )
 from mrma.policy.budget import BudgetLease
 
-TRANSPORT_ADAPTER_VERSION = "semantic-httpx/1.1"
+TRANSPORT_ADAPTER_VERSION = "semantic-httpx/1.2"
 SEMANTIC_REQUEST_ESTIMATE_VERSION = "declared-request-preflight/2.0"
 _LIBRARY_REQUEST_OVERHEAD_BYTES = 2048
 
@@ -40,9 +43,13 @@ class TransportPolicyError(RuntimeError):
         super().__init__(f"{code}: {message}")
 
 
-@dataclass(frozen=True)
-class PreparedSemanticRequest:
-    request: httpx.Request = field(repr=False)
+@dataclass(frozen=True, slots=True)
+class _PreparedSemanticRequest:
+    _request: httpx.Request = field(repr=False, compare=False)
+    _capability_id: str = field(repr=False)
+    _observation_token: str = field(repr=False)
+    prepared_request_digest: str = field(repr=False)
+    capability_seal: str = field(repr=False)
     authorization_request_fingerprint: str
     target_fingerprint: str
     origin_fingerprint: str
@@ -52,6 +59,9 @@ class PreparedSemanticRequest:
     request_body_bytes: int
     represented_bytes: int
     allow_cookie_field: bool
+
+
+PreparedSemanticRequest = _PreparedSemanticRequest
 
 
 class SemanticHttpAdapter:
@@ -80,6 +90,9 @@ class SemanticHttpAdapter:
             connection_mode=connection_mode,
             authorization_kernel=_GUARDED_TRANSPORT_CAPABILITY,
         )
+        self._capability_key = secrets.token_bytes(32)
+        self._active_observation_token: str | None = None
+        self._consumed_capabilities: set[str] = set()
         self._entered = False
 
     def __enter__(self) -> SemanticHttpAdapter:
@@ -117,12 +130,21 @@ class SemanticHttpAdapter:
     ) -> Iterator[None]:
         if not self._entered:
             raise TransportPolicyError("TRANSPORT_NOT_ENTERED", "adapter context is not active")
+        if self._active_observation_token is not None:
+            raise TransportPolicyError(
+                "OBSERVATION_SESSION_NESTED",
+                "adapter observation sessions cannot be nested",
+            )
         normalized_arm = arm if arm in {"control", "mutation"} else "control"
-        with self._transport.observation_session(
-            arm=normalized_arm,
-            round_index=round_index,
-        ):
-            yield
+        self._active_observation_token = secrets.token_hex(16)
+        try:
+            with self._transport.observation_session(
+                arm=normalized_arm,
+                round_index=round_index,
+            ):
+                yield
+        finally:
+            self._active_observation_token = None
 
     def public_policy(self) -> dict[str, object]:
         return {
@@ -159,7 +181,7 @@ class SemanticHttpAdapter:
         arm: str,
         round_index: int | None,
         allow_cookie_field: bool = True,
-    ) -> PreparedSemanticRequest:
+    ) -> _PreparedSemanticRequest:
         if not self._entered:
             raise TransportPolicyError("TRANSPORT_NOT_ENTERED", "adapter context is not active")
         normalized_arm = arm if arm in {"control", "mutation"} else "control"
@@ -172,6 +194,12 @@ class SemanticHttpAdapter:
             )
         if not authorization.decision.accepted:
             raise TransportPolicyError("AUTHORIZATION_REQUIRED", "authorization was not accepted")
+        observation_token = self._active_observation_token
+        if observation_token is None:
+            raise TransportPolicyError(
+                "OBSERVATION_SESSION_REQUIRED",
+                "request preparation requires an active adapter observation session",
+            )
         observed_fingerprint = request_fingerprint(request, authorization.canonical_url)
         if observed_fingerprint != authorization.request_fingerprint:
             raise TransportPolicyError(
@@ -186,50 +214,47 @@ class SemanticHttpAdapter:
             round_index=round_index,
             allow_cookie_field=allow_cookie_field,
         )
-        if prepared.method != authorization.decision.method:
-            raise TransportPolicyError("PREPARED_METHOD_MISMATCH", "HTTPX changed the method")
-        if str(prepared.url) != authorization.canonical_url:
-            raise TransportPolicyError(
-                "PREPARED_TARGET_MISMATCH",
-                "HTTPX prepared a different target than the authorized canonical URL",
-            )
         try:
-            host_values = [
-                value.decode("ascii")
-                for name, value in prepared.headers.raw
-                if name.lower() == b"host"
-            ]
-        except UnicodeDecodeError as exc:
-            raise TransportPolicyError(
-                "PREPARED_HOST_INVALID",
-                "the prepared Host field is not ASCII",
-            ) from exc
-        if len(host_values) != 1:
-            raise TransportPolicyError(
-                "PREPARED_HOST_INVALID",
-                "the prepared request must contain exactly one Host field",
+            prepared_host, represented_bytes = _prepared_request_state(prepared)
+            _enforce_prepared_authorization(prepared, prepared_host, authorization)
+            prepared_request_digest = _prepared_request_digest(
+                prepared,
+                effective_host=prepared_host,
+                represented_bytes=represented_bytes,
             )
-        scheme = urlsplit(authorization.canonical_url).scheme
-        try:
-            prepared_host = canonical_host_authority(host_values[0], scheme)
-        except (AuthorizationError, ValueError) as exc:
+        except TransportPolicyError:
+            raise
+        except (TypeError, ValueError, UnicodeError, httpx.HTTPError) as exc:
             raise TransportPolicyError(
-                "PREPARED_HOST_INVALID",
-                "the prepared Host field is malformed",
+                "PREPARED_REQUEST_INVALID",
+                "HTTPX produced a request that cannot be sealed for exact semantic replay",
             ) from exc
-        if prepared_host != authorization.effective_host_authority:
-            raise TransportPolicyError(
-                "PREPARED_HOST_MISMATCH",
-                "the prepared Host field differs from the authorized authority",
-            )
-        represented_bytes = represented_request_bytes(prepared)
         mutation_digest = (
             authorization.mutation.delta_digest
             if isinstance(authorization, AuthorizedMutationContext)
             else None
         )
-        return PreparedSemanticRequest(
-            request=prepared,
+        capability_id = secrets.token_hex(16)
+        capability_values = {
+            "capability_id": capability_id,
+            "observation_token": observation_token,
+            "prepared_request_digest": prepared_request_digest,
+            "authorization_request_fingerprint": authorization.request_fingerprint,
+            "target_fingerprint": authorization.decision.target_fingerprint,
+            "origin_fingerprint": _origin_fingerprint(authorization.decision.canonical_origin),
+            "mutation_delta_digest": mutation_digest,
+            "arm": normalized_arm,
+            "round_index": round_index,
+            "request_body_bytes": len(request.body),
+            "represented_bytes": represented_bytes,
+            "allow_cookie_field": allow_cookie_field,
+        }
+        return _PreparedSemanticRequest(
+            _request=prepared,
+            _capability_id=capability_id,
+            _observation_token=observation_token,
+            prepared_request_digest=prepared_request_digest,
+            capability_seal=self._seal_capability(capability_values),
             authorization_request_fingerprint=authorization.request_fingerprint,
             target_fingerprint=authorization.decision.target_fingerprint,
             origin_fingerprint=_origin_fingerprint(authorization.decision.canonical_origin),
@@ -270,7 +295,7 @@ class SemanticHttpAdapter:
 
     def send_prepared(
         self,
-        prepared: PreparedSemanticRequest,
+        prepared: _PreparedSemanticRequest,
         *,
         authorization: AuthorizedRequestContext,
         lease: BudgetLease,
@@ -287,6 +312,41 @@ class SemanticHttpAdapter:
             raise TransportPolicyError("EVIDENCE_RUN_MISMATCH", "evidence belongs to another run")
         if not authorization.decision.accepted:
             raise TransportPolicyError("AUTHORIZATION_REQUIRED", "authorization was not accepted")
+        if not isinstance(prepared, _PreparedSemanticRequest):
+            raise TransportPolicyError(
+                "PREPARED_CAPABILITY_INVALID",
+                "send_prepared requires a capability issued by this adapter",
+            )
+        request = prepared._request
+        if not isinstance(request, httpx.Request):
+            raise TransportPolicyError(
+                "PREPARED_CAPABILITY_INVALID",
+                "prepared capability does not contain an HTTPX request",
+            )
+        try:
+            prepared_host, current_represented_bytes = _prepared_request_state(request)
+            current_request_digest = _prepared_request_digest(
+                request,
+                effective_host=prepared_host,
+                represented_bytes=current_represented_bytes,
+            )
+        except (
+            TypeError,
+            ValueError,
+            UnicodeError,
+            httpx.HTTPError,
+            TransportPolicyError,
+        ) as exc:
+            raise TransportPolicyError(
+                "PREPARED_REQUEST_MUTATED",
+                "prepared HTTP request is no longer a valid buffered request",
+            ) from exc
+        if not hmac.compare_digest(current_request_digest, prepared.prepared_request_digest):
+            raise TransportPolicyError(
+                "PREPARED_REQUEST_MUTATED",
+                "prepared HTTP request changed after authorization and reservation",
+            )
+        _enforce_prepared_authorization(request, prepared_host, authorization)
         if prepared.authorization_request_fingerprint != authorization.request_fingerprint:
             raise TransportPolicyError(
                 "AUTHORIZATION_REQUEST_MISMATCH",
@@ -300,9 +360,17 @@ class SemanticHttpAdapter:
             authorization.decision.canonical_origin
         ) or lease.proposed.origin_fingerprint != prepared.origin_fingerprint:
             raise TransportPolicyError("LEASE_ORIGIN_MISMATCH", "lease belongs to another origin")
-        if prepared.request_body_bytes > lease.proposed.request_body_bytes:
+        expected_arm = (
+            "mutation" if isinstance(authorization, AuthorizedMutationContext) else "control"
+        )
+        if prepared.arm != expected_arm:
+            raise TransportPolicyError(
+                "PREPARED_ARM_MISMATCH",
+                "prepared request arm differs from its authorization capability",
+            )
+        if len(request.content) > lease.proposed.request_body_bytes:
             raise TransportPolicyError("LEASE_SEND_OVERRUN", "request body exceeds reservation")
-        if prepared.represented_bytes > lease.proposed.request_bytes:
+        if current_represented_bytes > lease.proposed.request_bytes:
             raise TransportPolicyError(
                 "LEASE_SEND_OVERRUN", "prepared request representation exceeds reservation"
             )
@@ -317,7 +385,48 @@ class SemanticHttpAdapter:
                     "MUTATION_AUTHORIZATION_MISMATCH",
                     "prepared request belongs to another mutation delta",
                 )
+        capability_values = {
+            "capability_id": prepared._capability_id,
+            "observation_token": prepared._observation_token,
+            "prepared_request_digest": prepared.prepared_request_digest,
+            "authorization_request_fingerprint": prepared.authorization_request_fingerprint,
+            "target_fingerprint": prepared.target_fingerprint,
+            "origin_fingerprint": prepared.origin_fingerprint,
+            "mutation_delta_digest": prepared.mutation_delta_digest,
+            "arm": prepared.arm,
+            "round_index": prepared.round_index,
+            "request_body_bytes": prepared.request_body_bytes,
+            "represented_bytes": prepared.represented_bytes,
+            "allow_cookie_field": prepared.allow_cookie_field,
+        }
+        if not hmac.compare_digest(
+            self._seal_capability(capability_values),
+            prepared.capability_seal,
+        ):
+            raise TransportPolicyError(
+                "PREPARED_CAPABILITY_INVALID",
+                "prepared request capability metadata was altered or issued by another adapter",
+            )
+        if prepared._observation_token != self._active_observation_token:
+            raise TransportPolicyError(
+                "PREPARED_OBSERVATION_MISMATCH",
+                "prepared request belongs to another observation session",
+            )
+        if prepared._capability_id in self._consumed_capabilities:
+            raise TransportPolicyError(
+                "PREPARED_CAPABILITY_CONSUMED",
+                "prepared request capability has already been used",
+            )
+        if (
+            prepared.request_body_bytes != len(request.content)
+            or prepared.represented_bytes != current_represented_bytes
+        ):
+            raise TransportPolicyError(
+                "PREPARED_REQUEST_MUTATED",
+                "prepared HTTP request accounting changed after reservation",
+            )
 
+        self._consumed_capabilities.add(prepared._capability_id)
         self.journal.record(
             "ATTEMPT_STARTED",
             {
@@ -338,14 +447,16 @@ class SemanticHttpAdapter:
                 "state_field_forwarding": (
                     "allowed" if prepared.allow_cookie_field else "suppressed"
                 ),
-                "request_representation_bytes": prepared.represented_bytes,
-                "mutation_delta_digest": prepared.mutation_delta_digest,
+                "request_representation_bytes": current_represented_bytes,
+                "mutation_delta_fingerprint": self._mutation_event_fingerprint(
+                    prepared.mutation_delta_digest
+                ),
             },
         )
         started = time.perf_counter()
         try:
             response = self._transport.capture_prepared(
-                prepared.request,
+                request,
                 prepared.arm,
                 max_response_bytes=lease.response_allowance,
                 body_storage=body_storage,
@@ -354,7 +465,7 @@ class SemanticHttpAdapter:
         except Exception as exc:
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             lease.commit(
-                bytes_sent=prepared.represented_bytes,
+                bytes_sent=current_represented_bytes,
                 bytes_received=0,
                 duration_ms=elapsed_ms,
             )
@@ -376,7 +487,7 @@ class SemanticHttpAdapter:
             charged_received - min(response.response_head_bytes, charged_received),
         )
         lease.commit(
-            bytes_sent=prepared.represented_bytes,
+            bytes_sent=current_represented_bytes,
             bytes_received=charged_received,
             duration_ms=elapsed_ms,
         )
@@ -396,6 +507,29 @@ class SemanticHttpAdapter:
             },
         )
         return response
+
+    def _seal_capability(self, values: Mapping[str, object]) -> str:
+        payload = json.dumps(
+            values,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("ascii")
+        return "hmac-sha256:" + hmac.new(
+            self._capability_key,
+            payload,
+            hashlib.sha256,
+        ).hexdigest()
+
+    def _mutation_event_fingerprint(self, delta_digest: str | None) -> str | None:
+        if delta_digest is None:
+            return None
+        return "hmac-sha256:" + hmac.new(
+            self._capability_key,
+            b"journal-mutation-delta\0" + delta_digest.encode("ascii"),
+            hashlib.sha256,
+        ).hexdigest()
 
 
 def _origin_fingerprint(origin: str) -> str:
@@ -436,3 +570,131 @@ def represented_request_bytes(request: httpx.Request) -> int:
     )
     fields = sum(len(name) + 2 + len(value) + 2 for name, value in request.headers.raw)
     return request_line + fields + 2 + len(request.content)
+
+
+def _prepared_host_authority(request: httpx.Request) -> str:
+    try:
+        host_values = [
+            value.decode("ascii")
+            for name, value in request.headers.raw
+            if name.lower() == b"host"
+        ]
+    except UnicodeDecodeError as exc:
+        raise TransportPolicyError(
+            "PREPARED_HOST_INVALID",
+            "the prepared Host field is not ASCII",
+        ) from exc
+    if len(host_values) != 1:
+        raise TransportPolicyError(
+            "PREPARED_HOST_INVALID",
+            "the prepared request must contain exactly one Host field",
+        )
+    try:
+        return canonical_host_authority(host_values[0], request.url.scheme)
+    except (AuthorizationError, ValueError) as exc:
+        raise TransportPolicyError(
+            "PREPARED_HOST_INVALID",
+            "the prepared Host field is malformed",
+        ) from exc
+
+
+def _prepared_request_state(request: httpx.Request) -> tuple[str, int]:
+    effective_host = _prepared_host_authority(request)
+    represented_bytes = represented_request_bytes(request)
+    return effective_host, represented_bytes
+
+
+def _enforce_prepared_authorization(
+    request: httpx.Request,
+    effective_host: str,
+    authorization: AuthorizedRequestContext,
+) -> None:
+    if request.method != authorization.decision.method:
+        raise TransportPolicyError("PREPARED_METHOD_MISMATCH", "HTTPX changed the method")
+    if str(request.url) != authorization.canonical_url:
+        raise TransportPolicyError(
+            "PREPARED_TARGET_MISMATCH",
+            "HTTPX prepared a different target than the authorized canonical URL",
+        )
+    if effective_host != authorization.effective_host_authority:
+        raise TransportPolicyError(
+            "PREPARED_HOST_MISMATCH",
+            "the prepared Host field differs from the authorized authority",
+        )
+
+
+def _prepared_request_digest(
+    request: httpx.Request,
+    *,
+    effective_host: str,
+    represented_bytes: int,
+) -> str:
+    body = request.content
+    stream_length = 0
+    stream_digest = hashlib.sha256()
+    if not isinstance(request.stream, httpx.ByteStream):
+        raise TypeError("prepared request body must remain a buffered HTTPX byte stream")
+    for chunk in request.stream:
+        if not isinstance(chunk, bytes):
+            raise TypeError("prepared request stream yielded a non-byte chunk")
+        stream_length += len(chunk)
+        stream_digest.update(chunk)
+    content_digest = hashlib.sha256(body).hexdigest()
+    if stream_length != len(body) or not hmac.compare_digest(
+        stream_digest.hexdigest(),
+        content_digest,
+    ):
+        raise ValueError("prepared request content and send stream differ")
+    document = {
+        "method": request.method,
+        "url": str(request.url),
+        "headers": [
+            [name.hex(), value.hex()]
+            for name, value in request.headers.raw
+        ],
+        "content_length": len(body),
+        "content_sha256": content_digest,
+        "stream_length": stream_length,
+        "stream_sha256": stream_digest.hexdigest(),
+        "extensions": _fingerprintable_extension_value(request.extensions),
+        "effective_host": effective_host,
+        "represented_bytes": represented_bytes,
+    }
+    payload = json.dumps(
+        document,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("ascii")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _fingerprintable_extension_value(value: object, *, depth: int = 0) -> object:
+    if depth > 8:
+        raise ValueError("prepared request extensions exceed the nesting limit")
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("prepared request extensions contain a non-finite number")
+        return {"float_hex": value.hex()}
+    if isinstance(value, bytes):
+        return {"bytes_hex": value.hex()}
+    if isinstance(value, Mapping):
+        if len(value) > 64 or any(not isinstance(key, str) for key in value):
+            raise ValueError("prepared request extension mappings must have bounded string keys")
+        return {
+            key: _fingerprintable_extension_value(item, depth=depth + 1)
+            for key, item in sorted(value.items())
+        }
+    if isinstance(value, Sequence):
+        if len(value) > 64:
+            raise ValueError("prepared request extension sequences exceed the item limit")
+        return [
+            _fingerprintable_extension_value(item, depth=depth + 1)
+            for item in value
+        ]
+    raise TypeError(
+        f"prepared request extension value {type(value).__name__!r} is not fingerprintable"
+    )

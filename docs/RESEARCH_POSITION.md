@@ -38,7 +38,7 @@ MRMA should treat every finding as an experiment, not an anomaly row:
 7. Minimize the responsible input using the same repeated oracle.
 8. Export a versioned evidence object that another engineer can replay and audit.
 
-Version 0.4.3 implements steps 1-6 for a single mutation in `mrma experiment`, including explicit
+Version 0.4.4 implements steps 1-6 for a single mutation in `mrma experiment`, including explicit
 state and connection modes, fixed-sample confidence decisions, canonical redirect and field-aware
 header semantics, ambiguity-preserving cache comparison, typed retry subtypes, multidimensional
 assurance, bounded observations, authorization, central budgets, recoverable evidence, and manual
