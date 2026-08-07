@@ -1,15 +1,15 @@
 {
   "schema_version": "mrma.benchmark/v2",
   "corpus_version": "trust-influence-loopback/2.0",
-  "mrma_version": "0.4.3",
+  "mrma_version": "0.4.4",
   "passed": true,
   "case_count": 22,
   "false_positive_count": 0,
   "false_negative_count": 0,
   "inconclusive_count": 11,
   "request_cost": 942,
-  "runtime_ms": 30930.869,
-  "peak_memory_bytes": 4125779,
+  "runtime_ms": 32230.963,
+  "peak_memory_bytes": 4075990,
   "platform": {
     "python": "3.12.13",
     "implementation": "CPython",
@@ -22,7 +22,7 @@
       "expected_verdict": "NO_INFLUENCE_OBSERVED",
       "actual_verdict": "NO_INFLUENCE_OBSERVED",
       "request_cost": 60,
-      "runtime_ms": 995.246,
+      "runtime_ms": 1006.829,
       "passed": true
     },
     {
@@ -30,7 +30,7 @@
       "expected_verdict": "INFLUENCE_DETECTED",
       "actual_verdict": "INFLUENCE_DETECTED",
       "request_cost": 60,
-      "runtime_ms": 3257.836,
+      "runtime_ms": 3481.81,
       "passed": true
     },
     {
@@ -38,7 +38,7 @@
       "expected_verdict": "INFLUENCE_DETECTED",
       "actual_verdict": "INFLUENCE_DETECTED",
       "request_cost": 60,
-      "runtime_ms": 788.237,
+      "runtime_ms": 880.162,
       "passed": true
     },
     {
@@ -46,7 +46,7 @@
       "expected_verdict": "INFLUENCE_DETECTED",
       "actual_verdict": "INFLUENCE_DETECTED",
       "request_cost": 60,
-      "runtime_ms": 772.523,
+      "runtime_ms": 817.229,
       "passed": true
     },
     {
@@ -54,7 +54,7 @@
       "expected_verdict": "INFLUENCE_DETECTED",
       "actual_verdict": "INFLUENCE_DETECTED",
       "request_cost": 80,
-      "runtime_ms": 956.01,
+      "runtime_ms": 1080.437,
       "passed": true
     },
     {
@@ -62,7 +62,7 @@
       "expected_verdict": "INFLUENCE_DETECTED",
       "actual_verdict": "INFLUENCE_DETECTED",
       "request_cost": 80,
-      "runtime_ms": 8924.049,
+      "runtime_ms": 9044.657,
       "passed": true
     },
     {
@@ -70,7 +70,7 @@
       "expected_verdict": "INCONCLUSIVE",
       "actual_verdict": "INCONCLUSIVE",
       "request_cost": 60,
-      "runtime_ms": 4526.488,
+      "runtime_ms": 4858.654,
       "passed": true
     },
     {
@@ -78,7 +78,7 @@
       "expected_verdict": "INCONCLUSIVE",
       "actual_verdict": "INCONCLUSIVE",
       "request_cost": 60,
-      "runtime_ms": 1018.989,
+      "runtime_ms": 1091.888,
       "passed": true
     },
     {
@@ -86,7 +86,7 @@
       "expected_verdict": "INCONCLUSIVE",
       "actual_verdict": "INCONCLUSIVE",
       "request_cost": 60,
-      "runtime_ms": 596.8,
+      "runtime_ms": 649.489,
       "passed": true
     },
     {
@@ -94,7 +94,7 @@
       "expected_verdict": "INCONCLUSIVE",
       "actual_verdict": "INCONCLUSIVE",
       "request_cost": 60,
-      "runtime_ms": 629.462,
+      "runtime_ms": 675.726,
       "passed": true
     },
     {
@@ -102,7 +102,7 @@
       "expected_verdict": "NO_INFLUENCE_OBSERVED",
       "actual_verdict": "NO_INFLUENCE_OBSERVED",
       "request_cost": 60,
-      "runtime_ms": 774.655,
+      "runtime_ms": 818.818,
       "passed": true
     },
     {
@@ -110,7 +110,7 @@
       "expected_verdict": "INFLUENCE_DETECTED",
       "actual_verdict": "INFLUENCE_DETECTED",
       "request_cost": 60,
-      "runtime_ms": 3761.168,
+      "runtime_ms": 3816.499,
       "passed": true
     },
     {
@@ -118,7 +118,7 @@
       "expected_verdict": "NO_INFLUENCE_OBSERVED",
       "actual_verdict": "NO_INFLUENCE_OBSERVED",
       "request_cost": 60,
-      "runtime_ms": 682.94,
+      "runtime_ms": 727.904,
       "passed": true
     },
     {
@@ -126,7 +126,7 @@
       "expected_verdict": "INCONCLUSIVE",
       "actual_verdict": "INCONCLUSIVE",
       "request_cost": 60,
-      "runtime_ms": 1848.475,
+      "runtime_ms": 1764.383,
       "passed": true
     },
     {
@@ -134,7 +134,7 @@
       "expected_verdict": "LIMITATION_RECORDED",
       "actual_verdict": "LIMITATION_RECORDED",
       "request_cost": 60,
-      "runtime_ms": 736.916,
+      "runtime_ms": 854.585,
       "passed": true
     },
     {
@@ -142,7 +142,7 @@
       "expected_verdict": "INCONCLUSIVE",
       "actual_verdict": "INCONCLUSIVE",
       "request_cost": 0,
-      "runtime_ms": 32.686,
+      "runtime_ms": 35.131,
       "passed": true
     },
     {
@@ -150,7 +150,7 @@
       "expected_verdict": "INCONCLUSIVE",
       "actual_verdict": "INCONCLUSIVE",
       "request_cost": 1,
-      "runtime_ms": 56.292,
+      "runtime_ms": 57.644,
       "passed": true
     },
     {
@@ -158,7 +158,7 @@
       "expected_verdict": "INCONCLUSIVE",
       "actual_verdict": "INCONCLUSIVE",
       "request_cost": 1,
-      "runtime_ms": 40.217,
+      "runtime_ms": 62.416,
       "passed": true
     },
     {
@@ -166,7 +166,7 @@
       "expected_verdict": "INCONCLUSIVE",
       "actual_verdict": "INCONCLUSIVE",
       "request_cost": 0,
-      "runtime_ms": 31.148,
+      "runtime_ms": 33.59,
       "passed": true
     },
     {
@@ -174,7 +174,7 @@
       "expected_verdict": "INCONCLUSIVE",
       "actual_verdict": "INCONCLUSIVE",
       "request_cost": 0,
-      "runtime_ms": 0.098,
+      "runtime_ms": 0.101,
       "passed": true
     },
     {
@@ -182,7 +182,7 @@
       "expected_verdict": "INCONCLUSIVE",
       "actual_verdict": "INCONCLUSIVE",
       "request_cost": 0,
-      "runtime_ms": 1.226,
+      "runtime_ms": 1.269,
       "passed": true
     },
     {
@@ -190,7 +190,7 @@
       "expected_verdict": "BINARY_PRESERVED",
       "actual_verdict": "BINARY_PRESERVED",
       "request_cost": 0,
-      "runtime_ms": 0.161,
+      "runtime_ms": 0.169,
       "passed": true
     }
   ]

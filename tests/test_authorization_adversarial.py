@@ -263,6 +263,23 @@ def test_policy_rejects_resolution_and_mutation_policy_failures(
             risk_class="unknown-extension",
         )
 
+    unsupported_payload = deepcopy(authorization_payload)
+    unsupported_payload["mutation_families"] = ["body"]
+    unsupported = ManifestAuthorizationPolicy(
+        load_authorization_manifest(
+            _write(tmp_path / "unsupported-authorization.json", unsupported_payload)
+        ),
+        resolver=lambda _host, _port: ("127.0.0.1",),
+    )
+    with pytest.raises(AuthorizationError, match="UNSUPPORTED_MUTATION_FAMILY"):
+        unsupported.authorize(
+            request,
+            base_url="http://example.test",
+            attempt_kind="mutation",
+            mutation_family="body",
+            risk_class="safe",
+        )
+
 
 def test_proxy_validation_and_revalidation_are_address_bound(
     tmp_path: Path,

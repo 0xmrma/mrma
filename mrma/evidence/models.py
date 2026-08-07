@@ -437,6 +437,7 @@ def build_experiment_v8(
             "fingerprint_policy": {
                 "run_local_hmac_fields": [
                     "authorization identities",
+                    "journal mutation-delta identifiers",
                     "request targets and values in the effective plan",
                     "response bodies and values",
                     "redacted URLs",

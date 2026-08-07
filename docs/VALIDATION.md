@@ -2,7 +2,7 @@
 
 ## Exact claim
 
-MRMA v0.4.3 is an authorization-enforcing, budgeted, recoverable HTTP trust-influence
+MRMA v0.4.4 is an authorization-enforcing, budgeted, recoverable HTTP trust-influence
 tool. It uses semantic HTTP replay and fixed-sample differential experiments.
 
 ## Non-claims
@@ -56,7 +56,10 @@ may vary; conclusions must all pass. See [BENCHMARKS.md](BENCHMARKS.md).
 - No stable connected-address, peer-certificate, cipher, or ALPN evidence on the supported adapter.
 - `impact` and other legacy workflows are policy guarded but remain statistically exploratory.
 - The CLI is not fully decomposed; the stable engine/policy/evidence APIs are separate.
-- Request sent-byte accounting is conservative estimation, not wire telemetry.
+- Plan request bytes are a conservative preflight estimate. Every attempt reserves the measured
+  final HTTPX request representation, including generated and cookie fields, after preparation and
+  verifies the sealed representation again immediately before sending. Neither value is wire
+  telemetry.
 - Hash chains provide integrity detection, not organizational identity.
 - No signed authorization grants, encrypted evidence store, distributed budgets, or multi-user
   governance.

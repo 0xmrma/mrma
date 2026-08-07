@@ -47,7 +47,9 @@ summary and digest, not the executable authorization manifest. Raw credentials, 
 authorization tokens, environment values, mutation secrets, and local paths are forbidden by model
 and tests. Version 8 declares cross-run correlation as partial because authorization digests,
 original-source digests, and journal target, origin, address-set, and effective-authority
-identifiers are deterministic.
+identifiers are deterministic. Mutation-delta identifiers written to the journal are run-local
+HMAC fingerprints; the deterministic local delta digest remains inside the authorization and
+transport capability boundary.
 
 ## Bundle
 

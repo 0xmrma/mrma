@@ -13,10 +13,11 @@ For each network attempt MRMA:
 
 1. authorizes the immutable request and any declared mutation delta;
 2. asks HTTPX to build the final request, including cookie-jar and generated fields;
-3. measures that prepared representation and checks effective method, target, and `Host` again;
+3. measures and seals that prepared representation after checking method, target, and `Host`;
 4. atomically reserves counters, bytes, timeout, and concurrency;
 5. revalidates authorization and records `BUDGET_RESERVED` plus `ATTEMPT_STARTED`;
-6. sends the exact prepared request object once;
+6. recomputes the prepared digest, verifies the adapter seal and authorization fields, then sends
+   the exact request object once;
 7. commits bounded actual bytes and elapsed duration, or releases the lease;
 8. records `BUDGET_UPDATED`.
 

@@ -75,6 +75,12 @@ declared aggregate capacity, target/mutation/hook authorization, and request bou
 consuming repetition or budget. `PlanSummary.approval_plan_digest` is a deterministic local identity;
 `PlanSummary.to_dict()` deliberately excludes it from shared evidence.
 
+`SemanticHttpAdapter.prepare()` returns an opaque adapter-issued capability exposing reservation
+metadata such as `represented_bytes`; it does not expose the mutable HTTPX request. Pass that
+capability directly to `send_prepared()` after reserving its exact represented size. Capabilities
+are bound to one adapter and observation session, are single-use, and are revalidated immediately
+before network I/O.
+
 ## Evidence APIs
 
 - `build_experiment_v8`: convert an `OracleRunResult` plus provenance into strict evidence.
