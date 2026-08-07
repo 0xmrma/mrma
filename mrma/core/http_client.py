@@ -8,11 +8,11 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from types import TracebackType
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 import httpx
 
-from .http_semantics import canonical_uri
+from .http_semantics import canonical_uri, semantic_request_url
 from .raw_request import RawRequest
 
 STATE_MODES = ("isolated", "per-arm", "shared-session")
@@ -373,9 +373,8 @@ class SemanticHttpTransport:
 
 
 def _merge_url(base_url: str, path: str) -> str:
-    if path.startswith("http://") or path.startswith("https://"):
-        return path
-    return urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
+    target_form = "absolute" if path.startswith(("http://", "https://")) else "origin"
+    return semantic_request_url(base_url, path, target_form)
 
 
 def _request_parts(req: RawRequest, base_url: str) -> tuple[str, list[tuple[str, str]]]:

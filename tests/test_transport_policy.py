@@ -51,7 +51,7 @@ def _components(
         len(request.body),
         estimated,
         1024,
-        1000,
+        15000,
     )
     return request, context, journal, ledger, evidence, cost
 
@@ -89,6 +89,7 @@ def test_adapter_requires_one_active_observation_for_preparation(
                 authorization=context,
                 arm="control",
                 round_index=1,
+                response_allowance=1024,
             )
         with adapter.observation_session(arm="control", round_index=1):
             with pytest.raises(TransportPolicyError, match="OBSERVATION_SESSION_NESTED"):
@@ -139,6 +140,7 @@ def test_prepare_revalidates_effective_httpx_request(
                 authorization=context,
                 arm="control",
                 round_index=1,
+                response_allowance=1024,
             )
 
 
@@ -278,6 +280,175 @@ def test_transport_rejects_missing_or_mismatched_policy_contexts(
         lease.release()
 
 
+def test_adapter_reserves_the_sealed_prepared_attempt_cost(
+    authorization_payload,
+    write_authorization,
+    monkeypatch,
+):
+    request, context, journal, ledger, evidence, _cost = _components(
+        authorization_payload, write_authorization
+    )
+    adapter = SemanticHttpAdapter(SendOptions(trust_env=False), journal=journal)
+    with adapter, adapter.observation_session(arm="control", round_index=1):
+        prepared = adapter.prepare(
+            request,
+            authorization=context,
+            arm="control",
+            round_index=1,
+            response_allowance=2048,
+        )
+        lease = adapter.reserve(prepared, budgets=ledger, evidence=evidence)
+
+    assert lease.proposed == prepared.budget_cost()
+    assert lease.proposed.request_bytes == prepared.represented_bytes
+    assert lease.proposed.response_bytes == 2048
+    assert lease.proposed.timeout_ms == 15000
+    lease.release()
+
+    other_journal = EvidenceJournal(run_id="other-budget")
+    other_ledger = BudgetLedger(ledger.limits, other_journal)
+    network_called = False
+
+    def capture(*_args, **_kwargs):
+        nonlocal network_called
+        network_called = True
+        raise AssertionError("mismatched budget policy reached the network adapter")
+
+    monkeypatch.setattr(adapter._transport, "capture_prepared", capture)
+    with adapter, adapter.observation_session(arm="control", round_index=1):
+        prepared = adapter.prepare(
+            request,
+            authorization=context,
+            arm="control",
+            round_index=1,
+            response_allowance=1024,
+        )
+        with pytest.raises(TransportPolicyError, match="BUDGET_JOURNAL_MISMATCH"):
+            adapter.reserve(prepared, budgets=other_ledger, evidence=evidence)
+        permissive_ledger = BudgetLedger(
+            replace(
+                ledger.limits,
+                total_network_attempts=ledger.limits.total_network_attempts + 1,
+            ),
+            journal,
+        )
+        with pytest.raises(TransportPolicyError, match="BUDGET_POLICY_MISMATCH"):
+            adapter.reserve(prepared, budgets=permissive_ledger, evidence=evidence)
+
+        wrong_policy_lease = permissive_ledger.reserve(
+            prepared.budget_cost(), evidence=evidence
+        )
+        with pytest.raises(TransportPolicyError, match="LEASE_BUDGET_POLICY_MISMATCH"):
+            adapter.send_prepared(
+                prepared,
+                authorization=context,
+                lease=wrong_policy_lease,
+                evidence=evidence,
+                body_storage="full",
+            )
+        wrong_policy_lease.release()
+
+    assert network_called is False
+
+
+@pytest.mark.parametrize(
+    ("variant", "code"),
+    [
+        ("kind", "LEASE_KIND_MISMATCH"),
+        ("risk", "LEASE_RISK_MISMATCH"),
+        ("depth", "LEASE_DEPTH_MISMATCH"),
+        ("timeout", "LEASE_TIMEOUT_MISMATCH"),
+        ("evidence-role", "EVIDENCE_ROLE_MISMATCH"),
+        ("evidence-round", "EVIDENCE_ROUND_MISMATCH"),
+    ],
+)
+def test_send_prepared_rejects_semantically_mismatched_leases_and_evidence(
+    authorization_payload,
+    write_authorization,
+    monkeypatch,
+    variant: str,
+    code: str,
+):
+    request, context, journal, ledger, evidence, _cost = _components(
+        authorization_payload, write_authorization
+    )
+    adapter = SemanticHttpAdapter(SendOptions(trust_env=False), journal=journal)
+    capture_called = False
+
+    def capture(*_args, **_kwargs):
+        nonlocal capture_called
+        capture_called = True
+        raise AssertionError("mismatched lease reached the network adapter")
+
+    monkeypatch.setattr(adapter._transport, "capture_prepared", capture)
+    with adapter, adapter.observation_session(arm="control", round_index=1):
+        prepared = adapter.prepare(
+            request,
+            authorization=context,
+            arm="control",
+            round_index=1,
+            response_allowance=1024,
+        )
+        proposed = prepared.budget_cost()
+        bound_evidence = evidence
+        if variant == "kind":
+            proposed = replace(proposed, kind="mutation")
+        elif variant == "risk":
+            proposed = replace(proposed, mutation_risk_level="idempotent-destructive")
+        elif variant == "depth":
+            proposed = replace(proposed, redirect_depth=1)
+        elif variant == "timeout":
+            proposed = replace(proposed, timeout_ms=14999)
+        elif variant == "evidence-role":
+            bound_evidence = replace(evidence, role="mutation")
+        else:
+            bound_evidence = replace(evidence, round_index=2)
+        lease = ledger.reserve(proposed, evidence=bound_evidence)
+        with pytest.raises(TransportPolicyError, match=code):
+            adapter.send_prepared(
+                prepared,
+                authorization=context,
+                lease=lease,
+                evidence=bound_evidence,
+                body_storage="full",
+            )
+        lease.release()
+
+    assert capture_called is False
+    assert all(event.event_type != "ATTEMPT_STARTED" for event in journal.events)
+
+
+@pytest.mark.parametrize(
+    ("response_allowance", "redirect_depth", "code"),
+    [
+        (0, 0, "PREPARED_ATTEMPT_INVALID"),
+        (1024, -1, "PREPARED_ATTEMPT_INVALID"),
+        (1024, 1, "PREPARED_REDIRECT_DEPTH_INVALID"),
+    ],
+)
+def test_prepare_rejects_invalid_budget_semantics(
+    authorization_payload,
+    write_authorization,
+    response_allowance: int,
+    redirect_depth: int,
+    code: str,
+):
+    request, context, journal, _ledger, _evidence, _cost = _components(
+        authorization_payload, write_authorization
+    )
+    adapter = SemanticHttpAdapter(SendOptions(trust_env=False), journal=journal)
+    with adapter, adapter.observation_session(arm="control", round_index=1):
+        with pytest.raises(TransportPolicyError, match=code):
+            adapter.prepare(
+                request,
+                authorization=context,
+                arm="control",
+                round_index=1,
+                response_allowance=response_allowance,
+                redirect_depth=redirect_depth,
+            )
+
+
 def test_transport_error_is_charged_and_evidenced(
     authorization_payload,
     write_authorization,
@@ -324,6 +495,7 @@ def test_mutation_arm_requires_delta_bound_authorization(
                 authorization=context,
                 arm="mutation",
                 round_index=1,
+                response_allowance=1024,
             )
 
 
@@ -358,6 +530,7 @@ def test_prepared_mutation_is_bound_to_delta_digest(
             authorization=context,
             arm="mutation",
             round_index=1,
+            response_allowance=1024,
         )
         cost = AttemptCost(
             "mutation",
@@ -366,10 +539,10 @@ def test_prepared_mutation_is_bound_to_delta_digest(
             len(mutation.body),
             prepared.represented_bytes,
             1024,
-            1000,
+            15000,
         )
         lease = ledger.reserve(cost, evidence=evidence)
-        with pytest.raises(TransportPolicyError, match="MUTATION_AUTHORIZATION_MISMATCH"):
+        with pytest.raises(TransportPolicyError, match="PREPARED_CAPABILITY_INVALID"):
             adapter.send_prepared(
                 replace(prepared, mutation_delta_digest="sha256:" + "0" * 64),
                 authorization=context,
@@ -397,6 +570,7 @@ def test_prepared_request_accounts_for_cookie_jar_fields(
             authorization=context,
             arm="control",
             round_index=1,
+            response_allowance=1024,
         )
 
     assert prepared.represented_bytes > estimate_semantic_request_bytes(
@@ -432,6 +606,7 @@ def test_prepared_request_capability_rejects_post_authorization_mutation(
             authorization=context,
             arm="control",
             round_index=1,
+            response_allowance=1024,
         )
         raw = prepared._request
         if variant == "method":
@@ -506,6 +681,7 @@ def test_prepare_rejects_mismatched_buffered_content_and_send_stream(
                 authorization=context,
                 arm="control",
                 round_index=1,
+                response_allowance=1024,
             )
 
 
@@ -523,6 +699,7 @@ def test_prepared_capability_seal_rejects_metadata_changes(
             authorization=context,
             arm="control",
             round_index=1,
+            response_allowance=1024,
         )
         altered = replace(prepared, represented_bytes=prepared.represented_bytes + 1)
         lease = ledger.reserve(
@@ -573,6 +750,7 @@ def test_prepared_capability_is_bound_to_its_observation_session(
                 authorization=context,
                 arm="control",
                 round_index=1,
+                response_allowance=1024,
             )
 
         monkeypatch.setattr(
@@ -628,6 +806,7 @@ def test_prepared_capability_is_single_use(
             authorization=context,
             arm="control",
             round_index=1,
+            response_allowance=1024,
         )
         exact_cost = replace(cost, request_bytes=prepared.represented_bytes)
         first_lease = ledger.reserve(exact_cost, evidence=evidence)

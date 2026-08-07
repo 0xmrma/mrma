@@ -8,7 +8,7 @@ integrity, and the distinction between complete and incomplete research. The pri
 1. no network attempt without authorization, lease, and journal context;
 2. no redirect, retry, or hook outside the same policy path;
 3. no decisive result from incomplete fixed sampling;
-4. no configured secrets or local paths in public v8 evidence;
+4. no configured secrets or local paths in public v9 evidence;
 5. no exact-transport claim from semantic replay.
 
 ## Considered threats

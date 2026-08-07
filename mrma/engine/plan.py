@@ -6,11 +6,10 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import cast
-from urllib.parse import urljoin
 
 from mrma.core.compare import resolve_equivalence_policy
 from mrma.core.experiment import ExperimentConfig
-from mrma.core.http_semantics import canonical_uri
+from mrma.core.http_semantics import canonical_uri, origin_base_url, semantic_request_url
 from mrma.core.raw_request import RawRequest
 from mrma.core.sender import SendPolicy
 from mrma.transport.semantic_http import estimate_semantic_request_bytes
@@ -86,6 +85,7 @@ class ExperimentPlan:
     reset_hooks: tuple[RawRequest, ...] = ()
 
     def __post_init__(self) -> None:
+        origin_base_url(self.base_url)
         if self.exploration_role not in {"exploration", "confirmation"}:
             raise ValueError("exploration_role must be exploration or confirmation")
         if self.exploration_role == "confirmation" and self.experiment.assurance_preset not in {
@@ -107,11 +107,7 @@ class ExperimentPlan:
         *,
         stable_private: bool = False,
     ) -> dict[str, object]:
-        target = (
-            request.path
-            if request.target_form == "absolute"
-            else urljoin(self.base_url.rstrip("/") + "/", request.path.lstrip("/"))
-        )
+        target = semantic_request_url(self.base_url, request.path, request.target_form)
         canonical_target = canonical_uri(target)
         redactor = self.experiment.redactor
 

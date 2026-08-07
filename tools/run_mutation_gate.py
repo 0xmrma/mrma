@@ -117,6 +117,15 @@ MUTATIONS = (
         ("tests/test_authorization.py::test_repeated_post_requires_key_and_obeys_manifest_limit",),
     ),
     Mutation(
+        "TARGET-ORIGIN-BASE",
+        "mrma/core/http_semantics.py",
+        'if parts.path not in {"", "/"} or parts.query or parts.fragment:',
+        "if False:",
+        (
+            "tests/test_http_client.py::test_origin_form_url_resolution_is_root_relative_and_requires_an_origin_base",
+        ),
+    ),
+    Mutation(
         "BUDGET-ATTEMPT-RESERVATION",
         "mrma/policy/budget.py",
         "combined.total_network_attempts + 1",
@@ -200,7 +209,7 @@ MUTATIONS = (
         "mrma/evidence/models.py",
         'result.status == "completed"\n        and result.completed_rounds',
         "result.completed_rounds",
-        ("tests/test_oracle.py::test_partial_outcomes_are_valid_v8_evidence",),
+        ("tests/test_oracle.py::test_partial_outcomes_are_valid_v9_evidence",),
     ),
     Mutation(
         "LEGACY-MUTATION-BASELINE",
@@ -235,9 +244,81 @@ MUTATIONS = (
         ("tests/test_transport_policy.py::test_transport_rejects_missing_or_mismatched_policy_contexts",),
     ),
     Mutation(
+        "TRANSPORT-LEASE-KIND",
+        "mrma/transport/semantic_http.py",
+        "if lease.proposed.kind != prepared.attempt_kind:",
+        "if False:",
+        (
+            "tests/test_transport_policy.py::test_send_prepared_rejects_semantically_mismatched_leases_and_evidence[kind-LEASE_KIND_MISMATCH]",
+        ),
+    ),
+    Mutation(
+        "TRANSPORT-LEASE-RISK",
+        "mrma/transport/semantic_http.py",
+        "if lease.proposed.mutation_risk_level != prepared.effective_risk:",
+        "if False:",
+        (
+            "tests/test_transport_policy.py::test_send_prepared_rejects_semantically_mismatched_leases_and_evidence[risk-LEASE_RISK_MISMATCH]",
+        ),
+    ),
+    Mutation(
+        "TRANSPORT-LEASE-DEPTH",
+        "mrma/transport/semantic_http.py",
+        "if lease.proposed.redirect_depth != prepared.redirect_depth:",
+        "if False:",
+        (
+            "tests/test_transport_policy.py::test_send_prepared_rejects_semantically_mismatched_leases_and_evidence[depth-LEASE_DEPTH_MISMATCH]",
+        ),
+    ),
+    Mutation(
+        "TRANSPORT-LEASE-TIMEOUT",
+        "mrma/transport/semantic_http.py",
+        "if lease.proposed.timeout_ms != prepared.transport_timeout_ms:",
+        "if False:",
+        (
+            "tests/test_transport_policy.py::test_send_prepared_rejects_semantically_mismatched_leases_and_evidence[timeout-LEASE_TIMEOUT_MISMATCH]",
+        ),
+    ),
+    Mutation(
+        "TRANSPORT-EVIDENCE-ROLE",
+        "mrma/transport/semantic_http.py",
+        "if evidence.role != prepared.attempt_kind:",
+        "if False:",
+        (
+            "tests/test_transport_policy.py::test_send_prepared_rejects_semantically_mismatched_leases_and_evidence[evidence-role-EVIDENCE_ROLE_MISMATCH]",
+        ),
+    ),
+    Mutation(
+        "TRANSPORT-EVIDENCE-ROUND",
+        "mrma/transport/semantic_http.py",
+        "if evidence.round_index != prepared.round_index:",
+        "if False:",
+        (
+            "tests/test_transport_policy.py::test_send_prepared_rejects_semantically_mismatched_leases_and_evidence[evidence-round-EVIDENCE_ROUND_MISMATCH]",
+        ),
+    ),
+    Mutation(
+        "TRANSPORT-BUDGET-POLICY",
+        "mrma/transport/semantic_http.py",
+        "if budgets.policy_digest != prepared.budget_policy_digest:",
+        "if False:",
+        (
+            "tests/test_transport_policy.py::test_adapter_reserves_the_sealed_prepared_attempt_cost",
+        ),
+    ),
+    Mutation(
+        "TRANSPORT-LEASE-BUDGET-POLICY",
+        "mrma/transport/semantic_http.py",
+        "if lease.policy_digest != prepared.budget_policy_digest:",
+        "if False:",
+        (
+            "tests/test_transport_policy.py::test_adapter_reserves_the_sealed_prepared_attempt_cost",
+        ),
+    ),
+    Mutation(
         "TRANSPORT-PREPARED-DIGEST",
         "mrma/transport/semantic_http.py",
-        "if not hmac.compare_digest(current_request_digest, prepared.prepared_request_digest):",
+        "if not hmac.compare_digest(request_digest, prepared.prepared_request_digest):",
         "if False:",
         (
             "tests/test_transport_policy.py::test_prepared_request_capability_rejects_post_authorization_mutation",
@@ -255,7 +336,7 @@ MUTATIONS = (
     Mutation(
         "TRANSPORT-CAPABILITY-SEAL",
         "mrma/transport/semantic_http.py",
-        "if not hmac.compare_digest(\n            self._seal_capability(capability_values),\n            prepared.capability_seal,\n        ):",
+        "if not hmac.compare_digest(\n            self._seal_capability(self._capability_values(prepared)),\n            prepared.capability_seal,\n        ):",
         "if False:",
         (
             "tests/test_transport_policy.py::test_prepared_capability_seal_rejects_metadata_changes",
@@ -303,6 +384,15 @@ MUTATIONS = (
         ("tests/test_oracle.py::test_result_verifier_recomputes_effective_plan_digest",),
     ),
     Mutation(
+        "EVIDENCE-VERDICT-DERIVATION",
+        "mrma/evidence/bundle.py",
+        'if run["verdict"] != derived_verdict or analysis["verdict"] != derived_verdict:',
+        "if False:",
+        (
+            "tests/test_oracle.py::test_result_verifier_rederives_v9_statistics_and_verdict",
+        ),
+    ),
+    Mutation(
         "JOURNAL-PLAN-BINDING",
         "mrma/evidence/bundle.py",
         "if not planned or any(value != expected for value in planned):",
@@ -314,9 +404,11 @@ MUTATIONS = (
     Mutation(
         "VERSIONED-V7-BUILDER",
         "mrma/evidence/models.py",
-        'raise ValueError(\n        "new mrma.experiment/v7 generation is disabled; use build_experiment_v8"\n    )',
+        'raise ValueError(\n        "new mrma.experiment/v7 generation is disabled; use build_experiment_v9"\n    )',
         "return {}",
-        ("tests/test_oracle.py::test_versioned_v7_builder_rejects_new_generation",),
+        (
+            "tests/test_oracle.py::test_versioned_builders_reject_legacy_generation_and_verify_legacy_documents",
+        ),
     ),
 )
 

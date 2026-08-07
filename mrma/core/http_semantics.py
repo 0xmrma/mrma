@@ -63,6 +63,35 @@ class CharsetResolution:
     registry_version: str = SEMANTIC_REGISTRY_VERSION
 
 
+def origin_base_url(base_url: str) -> str:
+    """Validate and normalize the origin-only base accepted by semantic replay."""
+    if any(ord(character) <= 0x20 or ord(character) == 0x7F for character in base_url):
+        raise ValueError("base_url cannot contain spaces or control characters")
+    parts = urlsplit(base_url)
+    if parts.scheme.lower() not in {"http", "https"} or not parts.netloc or not parts.hostname:
+        raise ValueError("base_url must contain an HTTP scheme and authority")
+    if parts.username is not None or parts.password is not None:
+        raise ValueError("base_url cannot contain userinfo")
+    try:
+        _ = parts.port
+    except ValueError as exc:
+        raise ValueError("base_url contains an invalid port") from exc
+    if parts.path not in {"", "/"} or parts.query or parts.fragment:
+        raise ValueError("base_url must contain only scheme and authority")
+    return urlunsplit((parts.scheme.lower(), parts.netloc, "", "", ""))
+
+
+def semantic_request_url(base_url: str, target: str, target_form: str) -> str:
+    """Resolve a semantic target without treating origin-form as path-relative."""
+    if target_form == "absolute":
+        return target
+    if target_form != "origin":
+        raise ValueError(f"unsupported semantic request target form {target_form!r}")
+    if not target.startswith("/"):
+        raise ValueError("origin-form request targets must start with '/'")
+    return origin_base_url(base_url) + target
+
+
 def _normalize_percent_encoding(value: str) -> str:
     def replace(match: re.Match[str]) -> str:
         octet = int(match.group(1), 16)

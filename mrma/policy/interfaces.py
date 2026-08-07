@@ -54,6 +54,16 @@ class TransportAdapter(Protocol):
         authorization: object,
         arm: str,
         round_index: int | None,
+        response_allowance: int,
+        redirect_depth: int = 0,
+    ) -> object: ...
+
+    def reserve(
+        self,
+        prepared: object,
+        *,
+        budgets: object,
+        evidence: object,
     ) -> object: ...
 
     def send(

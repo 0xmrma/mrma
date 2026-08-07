@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -83,6 +84,31 @@ def test_manifest_authorizes_exact_target_and_explicit_private_range(
     assert context.resolved_addresses == ("127.0.0.1",)
     assert context.decision.target_fingerprint.startswith("sha256:")
     assert "example.test" not in str(context.decision)
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://example.test/api",
+        "http://example.test?tenant=one",
+        "http://example.test#fragment",
+        "http://user@example.test",
+    ],
+)
+def test_origin_form_authorization_rejects_non_origin_base_urls(
+    authorization_payload,
+    write_authorization,
+    base_url: str,
+):
+    guarded = policy(authorization_payload, write_authorization)
+
+    with pytest.raises(AuthorizationError, match="INVALID_BASE_URL"):
+        guarded.authorize(
+            request(path="/admin"),
+            base_url=base_url,
+            attempt_kind="control",
+            risk_class="safe",
+        )
 
 
 def test_every_a_and_aaaa_answer_must_be_authorized(authorization_payload, write_authorization):
@@ -184,7 +210,10 @@ def test_expiration_userinfo_and_proxy_are_rejected(authorization_payload, write
     guarded = policy(authorization_payload, write_authorization)
     with pytest.raises(AuthorizationError, match="URL_USERINFO_REJECTED"):
         guarded.authorize(
-            request(path="http://user:pass@example.test/allowed"),
+            replace(
+                request(path="http://user:pass@example.test/allowed"),
+                target_form="absolute",
+            ),
             base_url="http://example.test",
             attempt_kind="control",
             risk_class="safe",
@@ -615,7 +644,7 @@ def test_authorization_requires_explicit_ascii_host_labels(
     guarded = policy(authorization_v2(authorization_payload), write_authorization)
     with pytest.raises(AuthorizationError, match="NON_ASCII_HOST_REJECTED"):
         guarded.authorize(
-            request(path="http://fa\u00df.de/allowed"),
+            replace(request(path="http://fa\u00df.de/allowed"), target_form="absolute"),
             base_url="http://example.test",
             attempt_kind="control",
             risk_class="safe",

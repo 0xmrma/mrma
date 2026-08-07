@@ -121,7 +121,16 @@ adding more mutation families.
 - [x] Require benchmark and semantic-mutation checks on protected `main`
 - [x] Synchronize SDK, architecture, budget, evidence, and validation contracts
 
-Version 0.4.4 is the maintained 0.4 baseline. The items below are optional research directions,
+## 0.4.5 - Invariant closure
+
+- [x] Derive attempt reservations from adapter-sealed request and policy semantics
+- [x] Bind lease kind, risk, redirect depth, timeout, and response allowance before network I/O
+- [x] Bind evidence role and round to the prepared attempt capability
+- [x] Require origin-only base URLs for origin-form request targets
+- [x] Publish v9 control-pair evidence and rederive fixed-sample conclusions offline
+- [x] Expand the critical-policy mutation gate to 49 killed cases
+
+Version 0.4.5 is the maintained 0.4 baseline. The items below are optional research directions,
 not commitments or current product claims.
 
 ## Possible 0.5 - Product-wide evidence oracle

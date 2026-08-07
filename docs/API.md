@@ -76,16 +76,18 @@ consuming repetition or budget. `PlanSummary.approval_plan_digest` is a determin
 `PlanSummary.to_dict()` deliberately excludes it from shared evidence.
 
 `SemanticHttpAdapter.prepare()` returns an opaque adapter-issued capability exposing reservation
-metadata such as `represented_bytes`; it does not expose the mutable HTTPX request. Pass that
-capability directly to `send_prepared()` after reserving its exact represented size. Capabilities
-are bound to one adapter and observation session, are single-use, and are revalidated immediately
-before network I/O.
+metadata such as `represented_bytes`; it does not expose the mutable HTTPX request. Pass it to
+`SemanticHttpAdapter.reserve()` with the shared `BudgetLedger` and `EvidenceContext`, then pass the
+returned lease to `send_prepared()`. The adapter derives the complete `AttemptCost` from sealed
+request semantics and rejects a ledger whose complete limits differ from the authorization
+manifest. Capabilities are bound to one adapter and observation session, are single-use, and are
+revalidated immediately before network I/O.
 
 ## Evidence APIs
 
-- `build_experiment_v8`: convert an `OracleRunResult` plus provenance into strict evidence.
-- `build_experiment_v7`: retained as an import-compatible rejection path. New v7 generation is
-  disabled; existing v7 documents remain verifiable.
+- `build_experiment_v9`: convert an `OracleRunResult` plus provenance into strict evidence.
+- `build_experiment_v7`, `build_experiment_v8`: retained as import-compatible rejection paths. New
+  legacy generation is disabled; existing v7 and v8 documents remain verifiable.
 - `validate_result_document`: JSON Schema and semantic cross-field verification.
 - `create_evidence_bundle`: deterministic atomic bundle creation from public evidence and journal.
 - `verify_evidence`, `verify_evidence_bundle`, `verify_journal`: offline integrity verification.

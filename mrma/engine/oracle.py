@@ -28,12 +28,11 @@ from mrma.policy.authorization import (
     AuthorizedRequestContext,
     ManifestAuthorizationPolicy,
 )
-from mrma.policy.budget import AttemptCost, BudgetError, BudgetLedger, BudgetSnapshot
+from mrma.policy.budget import BudgetError, BudgetLedger, BudgetLimits, BudgetSnapshot
 from mrma.policy.comparison import ComparisonPolicy
 from mrma.policy.method_risk import RISK_RANK, classify_method
 from mrma.transport.semantic_http import (
     SemanticHttpAdapter,
-    origin_fingerprint,
 )
 
 from .plan import ExperimentPlan, PlanSummary
@@ -130,6 +129,9 @@ class ExperimentOracle:
     ) -> None:
         if budgets.journal is not evidence or transport.journal is not evidence:
             raise ValueError("oracle components must share one evidence journal")
+        authorized_budget = BudgetLimits.from_mapping(authorization.manifest.budget)
+        if budgets.policy_digest != authorized_budget.policy_digest:
+            raise ValueError("oracle budget limits must match the authorization manifest")
         self.authorization = authorization
         self.budgets = budgets
         self.transport = transport
@@ -1007,28 +1009,24 @@ class ExperimentOracle:
                 "ATTEMPT_TIMEOUT_LIMIT",
                 "transport timeout exceeds the authorized per-attempt timeout",
             )
+        response_allowance = min(
+            plan.experiment.max_response_bytes,
+            self.budgets.limits.maximum_response_bytes,
+        )
         prepared = self.transport.prepare(
             request,
             authorization=context,
             arm="mutation" if mutation_attempt else "control",
             round_index=round_index,
+            response_allowance=response_allowance,
+            redirect_depth=redirect_depth,
             allow_cookie_field=allow_cookie_field,
         )
-        proposed = AttemptCost(
-            kind=role,
-            origin_fingerprint=origin_fingerprint(context.decision.canonical_origin),
-            target_fingerprint=context.decision.target_fingerprint,
-            request_body_bytes=len(request.body),
-            request_bytes=prepared.represented_bytes,
-            response_bytes=min(
-                plan.experiment.max_response_bytes,
-                self.budgets.limits.maximum_response_bytes,
-            ),
-            timeout_ms=timeout_ms,
-            redirect_depth=redirect_depth,
-            mutation_risk_level=risk,
+        lease = self.transport.reserve(
+            prepared,
+            budgets=self.budgets,
+            evidence=evidence,
         )
-        lease = self.budgets.reserve(proposed, evidence=evidence)
         try:
             try:
                 context = self.authorization.revalidate(context)
