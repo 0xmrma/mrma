@@ -338,6 +338,7 @@ class ExperimentResult:
     outcome_counts: dict[str, int]
     reasons: list[str]
     pairs: list[PairEvidence]
+    control_pairs: list[PairEvidence]
     observations: list[Observation]
     effective_policy: EffectiveEquivalencePolicy
     config: ExperimentConfig = field(repr=False)
@@ -1572,6 +1573,7 @@ def analyze_experiment(
         outcome_counts=outcome_counts,
         reasons=reasons,
         pairs=pairs,
+        control_pairs=control_pairs,
         observations=observations,
         effective_policy=policy,
         config=cfg,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import threading
 import time
 import uuid
@@ -12,8 +13,11 @@ from typing import TYPE_CHECKING, cast
 if TYPE_CHECKING:
     from mrma.evidence.journal import EvidenceContext, EvidenceJournal
 
-BUDGET_MODEL_VERSION = "budget-ledger/1.1"
+BUDGET_MODEL_VERSION = "budget-ledger/1.2"
 ATTEMPT_KINDS = frozenset({"control", "mutation", "retry", "redirect", "setup", "reset", "exploratory"})
+MUTATION_RISK_LEVELS = frozenset(
+    {"safe", "idempotent-destructive", "non-idempotent", "unknown-extension"}
+)
 
 
 class BudgetError(RuntimeError):
@@ -44,6 +48,16 @@ class BudgetLimits:
     redirect_depth: int
     mutation_risk_level: str
 
+    @property
+    def policy_digest(self) -> str:
+        payload = json.dumps(
+            asdict(self),
+            sort_keys=True,
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        return "sha256:" + hashlib.sha256(payload).hexdigest()
+
     @classmethod
     def from_mapping(cls, value: Mapping[str, object]) -> BudgetLimits:
         required = {field.name for field in cls.__dataclass_fields__.values()}
@@ -69,12 +83,7 @@ class BudgetLimits:
                 "INVALID_BUDGET_LIMIT",
                 "concurrency, timeout, maximum response, and total duration must be positive",
             )
-        if value["mutation_risk_level"] not in {
-            "safe",
-            "idempotent-destructive",
-            "non-idempotent",
-            "unknown-extension",
-        }:
+        if value["mutation_risk_level"] not in MUTATION_RISK_LEVELS:
             raise BudgetError("INVALID_BUDGET_LIMIT", "unknown mutation_risk_level")
         numeric_values = {name: cast(int, value[name]) for name in numeric}
         return cls(
@@ -127,6 +136,8 @@ class AttemptCost:
                 "INVALID_REQUEST_COST",
                 "request bytes cannot be smaller than the request body",
             )
+        if self.mutation_risk_level not in MUTATION_RISK_LEVELS:
+            raise BudgetError("INVALID_ATTEMPT_RISK", "unknown attempt mutation_risk_level")
 
 
 @dataclass(frozen=True)
@@ -236,6 +247,10 @@ class BudgetLease:
     def response_allowance(self) -> int:
         return self.proposed.response_bytes
 
+    @property
+    def policy_digest(self) -> str:
+        return self._ledger.policy_digest
+
     def commit(
         self,
         *,
@@ -290,6 +305,10 @@ class BudgetLedger:
     @property
     def journal(self) -> EvidenceJournal:
         return self._journal
+
+    @property
+    def policy_digest(self) -> str:
+        return self.limits.policy_digest
 
     def _combined(self) -> _MutableTotals:
         result = _MutableTotals()
@@ -381,6 +400,8 @@ class BudgetLedger:
                     "request_bytes_reserved": proposed.request_bytes,
                     "response_bytes": proposed.response_bytes,
                     "timeout_ms": proposed.timeout_ms,
+                    "redirect_depth": proposed.redirect_depth,
+                    "mutation_risk_level": proposed.mutation_risk_level,
                 },
             )
             return lease

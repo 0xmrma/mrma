@@ -8,6 +8,7 @@ from mrma.core.http_client import (
     _GUARDED_TRANSPORT_CAPABILITY,
     SemanticHttpTransport,
     SendOptions,
+    _merge_url,
     ssl_context_from_ca_bytes,
 )
 from mrma.core.raw_request import RawRequest
@@ -15,6 +16,17 @@ from mrma.core.raw_request import RawRequest
 
 def request(path: str = "/") -> RawRequest:
     return RawRequest("GET", path, "HTTP/1.1", [("Host", "example.test")], b"")
+
+
+def test_origin_form_url_resolution_is_root_relative_and_requires_an_origin_base():
+    assert _merge_url("https://example.test", "/admin") == "https://example.test/admin"
+    for base_url in (
+        "https://example.test/api",
+        "https://example.test?tenant=one",
+        "https://example.test#fragment",
+    ):
+        with pytest.raises(ValueError, match="base_url"):
+            _merge_url(base_url, "/admin")
 
 
 def mock_transport(monkeypatch, state_mode: str, handler, *, follow_redirects: bool = False):

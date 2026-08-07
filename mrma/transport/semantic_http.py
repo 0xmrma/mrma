@@ -28,9 +28,9 @@ from mrma.policy.authorization import (
     canonical_host_authority,
     request_fingerprint,
 )
-from mrma.policy.budget import BudgetLease
+from mrma.policy.budget import AttemptCost, BudgetLease, BudgetLedger
 
-TRANSPORT_ADAPTER_VERSION = "semantic-httpx/1.2"
+TRANSPORT_ADAPTER_VERSION = "semantic-httpx/1.3"
 SEMANTIC_REQUEST_ESTIMATE_VERSION = "declared-request-preflight/2.0"
 _LIBRARY_REQUEST_OVERHEAD_BYTES = 2048
 
@@ -56,9 +56,28 @@ class _PreparedSemanticRequest:
     mutation_delta_digest: str | None
     arm: str
     round_index: int | None
+    attempt_kind: str
+    effective_risk: str
+    redirect_depth: int
+    transport_timeout_ms: int
+    budget_policy_digest: str
     request_body_bytes: int
     represented_bytes: int
+    response_allowance: int
     allow_cookie_field: bool
+
+    def budget_cost(self) -> AttemptCost:
+        return AttemptCost(
+            kind=self.attempt_kind,
+            origin_fingerprint=self.origin_fingerprint,
+            target_fingerprint=self.target_fingerprint,
+            request_body_bytes=self.request_body_bytes,
+            request_bytes=self.represented_bytes,
+            response_bytes=self.response_allowance,
+            timeout_ms=self.transport_timeout_ms,
+            redirect_depth=self.redirect_depth,
+            mutation_risk_level=self.effective_risk,
+        )
 
 
 PreparedSemanticRequest = _PreparedSemanticRequest
@@ -180,6 +199,8 @@ class SemanticHttpAdapter:
         authorization: AuthorizedRequestContext,
         arm: str,
         round_index: int | None,
+        response_allowance: int,
+        redirect_depth: int = 0,
         allow_cookie_field: bool = True,
     ) -> _PreparedSemanticRequest:
         if not self._entered:
@@ -194,6 +215,29 @@ class SemanticHttpAdapter:
             )
         if not authorization.decision.accepted:
             raise TransportPolicyError("AUTHORIZATION_REQUIRED", "authorization was not accepted")
+        for name, value in {"redirect_depth": redirect_depth}.items():
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise TransportPolicyError(
+                    "PREPARED_ATTEMPT_INVALID",
+                    f"{name} must be a non-negative integer",
+                )
+        if (
+            not isinstance(response_allowance, int)
+            or isinstance(response_allowance, bool)
+            or response_allowance < 1
+        ):
+            raise TransportPolicyError(
+                "PREPARED_ATTEMPT_INVALID",
+                "response_allowance must be a positive integer",
+            )
+        attempt_kind = authorization.decision.attempt_kind
+        if (attempt_kind == "redirect" and redirect_depth < 1) or (
+            redirect_depth > 0 and attempt_kind not in {"redirect", "retry"}
+        ):
+            raise TransportPolicyError(
+                "PREPARED_REDIRECT_DEPTH_INVALID",
+                "redirect depth is inconsistent with the authorized attempt kind",
+            )
         observation_token = self._active_observation_token
         if observation_token is None:
             raise TransportPolicyError(
@@ -235,6 +279,7 @@ class SemanticHttpAdapter:
             else None
         )
         capability_id = secrets.token_hex(16)
+        transport_timeout_ms = int(self.options.timeout_s * 1000)
         capability_values = {
             "capability_id": capability_id,
             "observation_token": observation_token,
@@ -245,8 +290,14 @@ class SemanticHttpAdapter:
             "mutation_delta_digest": mutation_digest,
             "arm": normalized_arm,
             "round_index": round_index,
+            "attempt_kind": attempt_kind,
+            "effective_risk": authorization.decision.effective_risk,
+            "redirect_depth": redirect_depth,
+            "transport_timeout_ms": transport_timeout_ms,
+            "budget_policy_digest": authorization.decision.budget_policy_digest,
             "request_body_bytes": len(request.body),
             "represented_bytes": represented_bytes,
+            "response_allowance": response_allowance,
             "allow_cookie_field": allow_cookie_field,
         }
         return _PreparedSemanticRequest(
@@ -261,8 +312,14 @@ class SemanticHttpAdapter:
             mutation_delta_digest=mutation_digest,
             arm=normalized_arm,
             round_index=round_index,
+            attempt_kind=attempt_kind,
+            effective_risk=authorization.decision.effective_risk,
+            redirect_depth=redirect_depth,
+            transport_timeout_ms=transport_timeout_ms,
+            budget_policy_digest=authorization.decision.budget_policy_digest,
             request_body_bytes=len(request.body),
             represented_bytes=represented_bytes,
+            response_allowance=response_allowance,
             allow_cookie_field=allow_cookie_field,
         )
 
@@ -283,6 +340,8 @@ class SemanticHttpAdapter:
             authorization=authorization,
             arm=arm,
             round_index=round_index,
+            response_allowance=lease.proposed.response_bytes,
+            redirect_depth=lease.proposed.redirect_depth,
             allow_cookie_field=allow_cookie_field,
         )
         return self.send_prepared(
@@ -293,99 +352,28 @@ class SemanticHttpAdapter:
             body_storage=body_storage,
         )
 
-    def send_prepared(
+    def reserve(
         self,
         prepared: _PreparedSemanticRequest,
         *,
-        authorization: AuthorizedRequestContext,
-        lease: BudgetLease,
+        budgets: BudgetLedger,
         evidence: EvidenceContext,
-        body_storage: str,
-    ) -> CapturedResponse:
-        if not self._entered:
-            raise TransportPolicyError("TRANSPORT_NOT_ENTERED", "adapter context is not active")
-        if not lease.active:
-            raise TransportPolicyError("BUDGET_LEASE_REQUIRED", "budget lease is inactive")
-        if lease.evidence != evidence:
-            raise TransportPolicyError("EVIDENCE_CONTEXT_MISMATCH", "lease belongs to another attempt")
-        if evidence.run_id != self.journal.run_id:
-            raise TransportPolicyError("EVIDENCE_RUN_MISMATCH", "evidence belongs to another run")
-        if not authorization.decision.accepted:
-            raise TransportPolicyError("AUTHORIZATION_REQUIRED", "authorization was not accepted")
-        if not isinstance(prepared, _PreparedSemanticRequest):
+    ) -> BudgetLease:
+        if budgets.journal is not self.journal:
             raise TransportPolicyError(
-                "PREPARED_CAPABILITY_INVALID",
-                "send_prepared requires a capability issued by this adapter",
+                "BUDGET_JOURNAL_MISMATCH",
+                "adapter and budget ledger must share one evidence journal",
             )
-        request = prepared._request
-        if not isinstance(request, httpx.Request):
+        self._validate_capability(prepared, evidence=evidence)
+        if budgets.policy_digest != prepared.budget_policy_digest:
             raise TransportPolicyError(
-                "PREPARED_CAPABILITY_INVALID",
-                "prepared capability does not contain an HTTPX request",
+                "BUDGET_POLICY_MISMATCH",
+                "budget ledger limits differ from the authorization policy",
             )
-        try:
-            prepared_host, current_represented_bytes = _prepared_request_state(request)
-            current_request_digest = _prepared_request_digest(
-                request,
-                effective_host=prepared_host,
-                represented_bytes=current_represented_bytes,
-            )
-        except (
-            TypeError,
-            ValueError,
-            UnicodeError,
-            httpx.HTTPError,
-            TransportPolicyError,
-        ) as exc:
-            raise TransportPolicyError(
-                "PREPARED_REQUEST_MUTATED",
-                "prepared HTTP request is no longer a valid buffered request",
-            ) from exc
-        if not hmac.compare_digest(current_request_digest, prepared.prepared_request_digest):
-            raise TransportPolicyError(
-                "PREPARED_REQUEST_MUTATED",
-                "prepared HTTP request changed after authorization and reservation",
-            )
-        _enforce_prepared_authorization(request, prepared_host, authorization)
-        if prepared.authorization_request_fingerprint != authorization.request_fingerprint:
-            raise TransportPolicyError(
-                "AUTHORIZATION_REQUEST_MISMATCH",
-                "prepared request belongs to another authorization context",
-            )
-        if prepared.target_fingerprint != authorization.decision.target_fingerprint or (
-            lease.proposed.target_fingerprint != authorization.decision.target_fingerprint
-        ):
-            raise TransportPolicyError("LEASE_TARGET_MISMATCH", "lease belongs to another target")
-        if prepared.origin_fingerprint != _origin_fingerprint(
-            authorization.decision.canonical_origin
-        ) or lease.proposed.origin_fingerprint != prepared.origin_fingerprint:
-            raise TransportPolicyError("LEASE_ORIGIN_MISMATCH", "lease belongs to another origin")
-        expected_arm = (
-            "mutation" if isinstance(authorization, AuthorizedMutationContext) else "control"
-        )
-        if prepared.arm != expected_arm:
-            raise TransportPolicyError(
-                "PREPARED_ARM_MISMATCH",
-                "prepared request arm differs from its authorization capability",
-            )
-        if len(request.content) > lease.proposed.request_body_bytes:
-            raise TransportPolicyError("LEASE_SEND_OVERRUN", "request body exceeds reservation")
-        if current_represented_bytes > lease.proposed.request_bytes:
-            raise TransportPolicyError(
-                "LEASE_SEND_OVERRUN", "prepared request representation exceeds reservation"
-            )
-        if prepared.arm == "mutation":
-            if not isinstance(authorization, AuthorizedMutationContext):
-                raise TransportPolicyError(
-                    "MUTATION_AUTHORIZATION_REQUIRED",
-                    "mutation transport requires a validated mutation context",
-                )
-            if prepared.mutation_delta_digest != authorization.mutation.delta_digest:
-                raise TransportPolicyError(
-                    "MUTATION_AUTHORIZATION_MISMATCH",
-                    "prepared request belongs to another mutation delta",
-                )
-        capability_values = {
+        return budgets.reserve(prepared.budget_cost(), evidence=evidence)
+
+    def _capability_values(self, prepared: _PreparedSemanticRequest) -> dict[str, object]:
+        return {
             "capability_id": prepared._capability_id,
             "observation_token": prepared._observation_token,
             "prepared_request_digest": prepared.prepared_request_digest,
@@ -395,12 +383,44 @@ class SemanticHttpAdapter:
             "mutation_delta_digest": prepared.mutation_delta_digest,
             "arm": prepared.arm,
             "round_index": prepared.round_index,
+            "attempt_kind": prepared.attempt_kind,
+            "effective_risk": prepared.effective_risk,
+            "redirect_depth": prepared.redirect_depth,
+            "transport_timeout_ms": prepared.transport_timeout_ms,
+            "budget_policy_digest": prepared.budget_policy_digest,
             "request_body_bytes": prepared.request_body_bytes,
             "represented_bytes": prepared.represented_bytes,
+            "response_allowance": prepared.response_allowance,
             "allow_cookie_field": prepared.allow_cookie_field,
         }
+
+    def _validate_capability(
+        self,
+        prepared: _PreparedSemanticRequest,
+        *,
+        evidence: EvidenceContext,
+    ) -> tuple[httpx.Request, str, int]:
+        if not self._entered:
+            raise TransportPolicyError("TRANSPORT_NOT_ENTERED", "adapter context is not active")
+        if not isinstance(prepared, _PreparedSemanticRequest):
+            raise TransportPolicyError(
+                "PREPARED_CAPABILITY_INVALID",
+                "operation requires a capability issued by this adapter",
+            )
+        if evidence.run_id != self.journal.run_id:
+            raise TransportPolicyError("EVIDENCE_RUN_MISMATCH", "evidence belongs to another run")
+        if evidence.role != prepared.attempt_kind:
+            raise TransportPolicyError(
+                "EVIDENCE_ROLE_MISMATCH",
+                "evidence role differs from the authorized attempt kind",
+            )
+        if evidence.round_index != prepared.round_index:
+            raise TransportPolicyError(
+                "EVIDENCE_ROUND_MISMATCH",
+                "evidence round differs from the prepared attempt round",
+            )
         if not hmac.compare_digest(
-            self._seal_capability(capability_values),
+            self._seal_capability(self._capability_values(prepared)),
             prepared.capability_seal,
         ):
             raise TransportPolicyError(
@@ -417,15 +437,150 @@ class SemanticHttpAdapter:
                 "PREPARED_CAPABILITY_CONSUMED",
                 "prepared request capability has already been used",
             )
+        request = prepared._request
+        if not isinstance(request, httpx.Request):
+            raise TransportPolicyError(
+                "PREPARED_CAPABILITY_INVALID",
+                "prepared capability does not contain an HTTPX request",
+            )
+        try:
+            prepared_host, represented_bytes = _prepared_request_state(request)
+            request_digest = _prepared_request_digest(
+                request,
+                effective_host=prepared_host,
+                represented_bytes=represented_bytes,
+            )
+        except (
+            TypeError,
+            ValueError,
+            UnicodeError,
+            httpx.HTTPError,
+            TransportPolicyError,
+        ) as exc:
+            raise TransportPolicyError(
+                "PREPARED_REQUEST_MUTATED",
+                "prepared HTTP request is no longer a valid buffered request",
+            ) from exc
+        if not hmac.compare_digest(request_digest, prepared.prepared_request_digest):
+            raise TransportPolicyError(
+                "PREPARED_REQUEST_MUTATED",
+                "prepared HTTP request changed after authorization",
+            )
         if (
             prepared.request_body_bytes != len(request.content)
-            or prepared.represented_bytes != current_represented_bytes
+            or prepared.represented_bytes != represented_bytes
         ):
             raise TransportPolicyError(
                 "PREPARED_REQUEST_MUTATED",
-                "prepared HTTP request accounting changed after reservation",
+                "prepared HTTP request accounting changed after authorization",
             )
+        return request, prepared_host, represented_bytes
 
+    def send_prepared(
+        self,
+        prepared: _PreparedSemanticRequest,
+        *,
+        authorization: AuthorizedRequestContext,
+        lease: BudgetLease,
+        evidence: EvidenceContext,
+        body_storage: str,
+    ) -> CapturedResponse:
+        if not lease.active:
+            raise TransportPolicyError("BUDGET_LEASE_REQUIRED", "budget lease is inactive")
+        if lease.evidence != evidence:
+            raise TransportPolicyError("EVIDENCE_CONTEXT_MISMATCH", "lease belongs to another attempt")
+        if not authorization.decision.accepted:
+            raise TransportPolicyError("AUTHORIZATION_REQUIRED", "authorization was not accepted")
+        request, prepared_host, current_represented_bytes = self._validate_capability(
+            prepared,
+            evidence=evidence,
+        )
+        _enforce_prepared_authorization(request, prepared_host, authorization)
+        if prepared.authorization_request_fingerprint != authorization.request_fingerprint:
+            raise TransportPolicyError(
+                "AUTHORIZATION_REQUEST_MISMATCH",
+                "prepared request belongs to another authorization context",
+            )
+        if prepared.target_fingerprint != authorization.decision.target_fingerprint or (
+            lease.proposed.target_fingerprint != authorization.decision.target_fingerprint
+        ):
+            raise TransportPolicyError("LEASE_TARGET_MISMATCH", "lease belongs to another target")
+        if prepared.origin_fingerprint != _origin_fingerprint(
+            authorization.decision.canonical_origin
+        ) or lease.proposed.origin_fingerprint != prepared.origin_fingerprint:
+            raise TransportPolicyError("LEASE_ORIGIN_MISMATCH", "lease belongs to another origin")
+        if prepared.attempt_kind != authorization.decision.attempt_kind:
+            raise TransportPolicyError(
+                "PREPARED_ATTEMPT_KIND_MISMATCH",
+                "prepared attempt kind differs from authorization",
+            )
+        if lease.proposed.kind != prepared.attempt_kind:
+            raise TransportPolicyError(
+                "LEASE_KIND_MISMATCH",
+                "lease kind differs from the authorized attempt kind",
+            )
+        if prepared.effective_risk != authorization.decision.effective_risk:
+            raise TransportPolicyError(
+                "PREPARED_RISK_MISMATCH",
+                "prepared attempt risk differs from authorization",
+            )
+        if lease.proposed.mutation_risk_level != prepared.effective_risk:
+            raise TransportPolicyError(
+                "LEASE_RISK_MISMATCH",
+                "lease risk differs from the authorized effective risk",
+            )
+        if lease.proposed.redirect_depth != prepared.redirect_depth:
+            raise TransportPolicyError(
+                "LEASE_DEPTH_MISMATCH",
+                "lease redirect depth differs from the prepared attempt",
+            )
+        actual_timeout_ms = int(self.options.timeout_s * 1000)
+        if prepared.transport_timeout_ms != actual_timeout_ms:
+            raise TransportPolicyError(
+                "PREPARED_TIMEOUT_MISMATCH",
+                "prepared timeout differs from the active transport timeout",
+            )
+        if lease.proposed.timeout_ms != prepared.transport_timeout_ms:
+            raise TransportPolicyError(
+                "LEASE_TIMEOUT_MISMATCH",
+                "lease timeout differs from the active transport timeout",
+            )
+        if lease.policy_digest != prepared.budget_policy_digest:
+            raise TransportPolicyError(
+                "LEASE_BUDGET_POLICY_MISMATCH",
+                "lease was issued under limits that differ from authorization",
+            )
+        expected_arm = (
+            "mutation" if isinstance(authorization, AuthorizedMutationContext) else "control"
+        )
+        if prepared.arm != expected_arm:
+            raise TransportPolicyError(
+                "PREPARED_ARM_MISMATCH",
+                "prepared request arm differs from its authorization capability",
+            )
+        if len(request.content) > lease.proposed.request_body_bytes:
+            raise TransportPolicyError("LEASE_SEND_OVERRUN", "request body exceeds reservation")
+        if current_represented_bytes > lease.proposed.request_bytes:
+            raise TransportPolicyError(
+                "LEASE_SEND_OVERRUN",
+                "prepared request representation exceeds reservation",
+            )
+        if lease.proposed.response_bytes != prepared.response_allowance:
+            raise TransportPolicyError(
+                "LEASE_RESPONSE_MISMATCH",
+                "lease response allowance differs from the prepared attempt",
+            )
+        if prepared.arm == "mutation":
+            if not isinstance(authorization, AuthorizedMutationContext):
+                raise TransportPolicyError(
+                    "MUTATION_AUTHORIZATION_REQUIRED",
+                    "mutation transport requires a validated mutation context",
+                )
+            if prepared.mutation_delta_digest != authorization.mutation.delta_digest:
+                raise TransportPolicyError(
+                    "MUTATION_AUTHORIZATION_MISMATCH",
+                    "prepared request belongs to another mutation delta",
+                )
         self._consumed_capabilities.add(prepared._capability_id)
         self.journal.record(
             "ATTEMPT_STARTED",

@@ -109,14 +109,15 @@ def test_cli_emits_schema_valid_evidence_and_stable_influence_exit_code(
     assert process.returncode == 10, process.stderr
     payload = json.loads(process.stdout)
     schema = json.loads(
-        files("mrma.schemas").joinpath("experiment-v8.schema.json").read_text(encoding="utf-8")
+        files("mrma.schemas").joinpath("experiment-v9.schema.json").read_text(encoding="utf-8")
     )
     Draft202012Validator.check_schema(schema)
     validator = Draft202012Validator(schema)
     validator.validate(payload)
-    assert payload["schema_version"] == "mrma.experiment/v8"
+    assert payload["schema_version"] == "mrma.experiment/v9"
     assert payload["run"]["verdict"] == "INFLUENCE_DETECTED"
     assert payload["analysis"]["verdict"] == "INFLUENCE_DETECTED"
+    assert len(payload["analysis"]["control_evidence"]) == 20
     assert len(payload["analysis"]["observations"]) == 60
     assert payload["run"]["started_at"].endswith(":00+00:00")
     assert payload["run"]["timestamp_precision"] == "minute"
@@ -164,7 +165,9 @@ def test_cli_emits_schema_valid_evidence_and_stable_influence_exit_code(
     assert verify_evidence(journal_path)["verified"] is True
     result_path = tmp_path / "result.json"
     result_path.write_text(json.dumps(payload), encoding="utf-8")
-    assert verify_evidence(result_path)["schema_valid"] is True
+    verification = verify_evidence(result_path)
+    assert verification["schema_valid"] is True
+    assert verification["statistical_derivation_verified"] is True
 
     digest_tamper = tmp_path / "digest-tamper.zip"
     _rewrite_bundle(
@@ -410,7 +413,7 @@ def test_cli_emits_schema_valid_evidence_and_stable_influence_exit_code(
         _sync_manifest_entry(entries, "result.json")
 
     _rewrite_bundle(second_bundle, missing_observation, add_result_observation)
-    with pytest.raises(EvidenceIntegrityError, match="MISSING_JOURNAL_OBSERVATIONS"):
+    with pytest.raises(EvidenceIntegrityError, match="STATISTICAL_DERIVATION_MISMATCH"):
         verify_evidence_bundle(missing_observation)
 
     with pytest.warns(UserWarning, match="Duplicate name"):

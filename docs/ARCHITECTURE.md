@@ -2,7 +2,7 @@
 
 ## Product boundary
 
-MRMA v0.4.4 has one confirmatory engine and one shared network policy kernel. The CLI parses input,
+MRMA v0.4.5 has one confirmatory engine and one shared network policy kernel. The CLI parses input,
 selects workflow policy, and renders output. It does not own transport authorization decisions.
 
 ```text
@@ -15,7 +15,7 @@ ExperimentPlan + ComparisonPolicy
 ExperimentOracle
   | authorization -> AuthorizedRequestContext
   | prepare       -> opaque, adapter-sealed request capability
-  | budget        -> BudgetLease for the prepared representation
+  | reserve       -> BudgetLease derived from sealed attempt semantics
   | revalidate    -> authorization + prepared capability
   | journal       -> EvidenceContext
         |
@@ -23,7 +23,7 @@ ExperimentOracle
 SemanticHttpAdapter (HTTPX, follow_redirects=False)
         |
         v
-CapturedResponse -> experiment analysis -> v8 evidence -> bundle
+CapturedResponse -> experiment analysis -> v9 evidence -> bundle
 ```
 
 ## Enforced boundaries
@@ -37,7 +37,8 @@ extensions, effective `Host`, and represented size.
 `SemanticHttpAdapter.send_prepared()` requires that capability plus an accepted
 `AuthorizedRequestContext`, active `BudgetLease`, and matching `EvidenceContext`. Immediately before
 network I/O it recomputes the request digest, verifies the adapter seal, repeats method/URL/`Host`
-authorization checks, and compares actual body and representation sizes with the reservation. A
+authorization checks, and compares kind, effective risk, redirect depth, timeout, response
+allowance, evidence role/round, body, and representation with the reservation. A
 changed, stale-session, or already-consumed capability fails before `ATTEMPT_STARTED`. `send()` is
 the single-call convenience path through the same prepare and send-prepared boundary; neither
 method can be called with only a URL.
@@ -54,7 +55,7 @@ HTTPX-built request so eligible cookie-jar state cannot bypass raw-field filteri
 - `mrma.policy`: authorization, budgets, comparison, method risk, and protocol interfaces.
 - `mrma.transport`: semantic HTTP adapter, opaque prepared capability, and request-byte estimator.
   The capability preserves the public type name but does not expose a public HTTPX request field.
-- `mrma.evidence`: append-only journal, v8 model, schema validation, bundles, and verification.
+- `mrma.evidence`: append-only journal, v9 model, schema validation, bundles, and verification.
 - `mrma.workflows`: candidate manifests and guarded legacy exploratory dispatch.
 - `mrma.core`: comparison, statistical experiment, HTTP semantics, request model, and retained
   legacy algorithms.

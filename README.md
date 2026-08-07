@@ -16,7 +16,7 @@
   verifiable evidence.
 </p>
 
-> **Current release: v0.4.4.** MRMA uses semantic HTTP through HTTPX. It does not claim wire-exact
+> **Current release: v0.4.5.** MRMA uses semantic HTTP through HTTPX. It does not claim wire-exact
 > replay, prove exploitability, assign severity, or identify a proprietary component from
 > black-box behavior.
 
@@ -74,7 +74,7 @@ Comparison + fixed-sample conclusion
 ## Install
 
 ```bash
-python -m pip install mrma==0.4.4
+python -m pip install mrma==0.4.5
 mrma --version
 ```
 
@@ -83,8 +83,8 @@ MRMA is tested on Python 3.10 and 3.13 across Linux, Windows, and macOS.
 The published container supports Linux AMD64 and ARM64:
 
 ```bash
-docker pull ghcr.io/0xmrma/mrma:0.4.4
-docker run --rm ghcr.io/0xmrma/mrma:0.4.4 --version
+docker pull ghcr.io/0xmrma/mrma:0.4.5
+docker run --rm ghcr.io/0xmrma/mrma:0.4.5 --version
 ```
 
 ## Start without network traffic
@@ -152,7 +152,7 @@ opt-in: `10` for influence and `11` for inconclusive under the selected `--fail-
 ```text
 evidence.zip
 |-- manifest.json       file set, sizes, and SHA-256 digests
-|-- result.json         strict mrma.experiment/v8 document
+|-- result.json         strict mrma.experiment/v9 document
 |-- plan.json           privacy-safe effective plan + bound digest
 |-- journal.jsonl       append-only hash-chained runtime events
 |-- authorization.json  non-executable policy summary
@@ -163,15 +163,16 @@ evidence.zip
 ```
 
 `mrma evidence verify` checks the bundle manifest, exact schema, result cross-fields, effective-plan
-digest, `RUN_PLANNED` linkage, journal chain/head/count, observation count, authorization summary,
-and benchmark contract. Integrity verification does not prove who created an entirely new bundle;
-artifact authenticity is supplied separately by GitHub release and OCI attestations.
+digest, `RUN_PLANNED` linkage, journal chain/head/count, observation topology, authorization summary,
+benchmark contract, aggregate statistics, confidence intervals, and final verdict. Integrity
+verification does not prove who created an entirely new bundle; artifact authenticity is supplied
+separately by GitHub release and OCI attestations.
 
 ## Workflows
 
 | Interface | Role | Output |
 |---|---|---|
-| `experiment` | Confirmatory fixed-sample oracle | Strict v8 result and optional evidence bundle |
+| `experiment` | Confirmatory fixed-sample oracle | Strict v9 result and optional evidence bundle |
 | `impact` | Exploratory candidate ranking | Candidate manifest for independent confirmation |
 | `run`, `diff`, `discover`, `isolate`, profiles, `report` | Policy-guarded exploration | Bounded observations and journal events |
 | `benchmark` | Deterministic local validation | Schema-validated 22-case result |

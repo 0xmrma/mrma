@@ -13,8 +13,10 @@ For each network attempt MRMA:
 
 1. authorizes the immutable request and any declared mutation delta;
 2. asks HTTPX to build the final request, including cookie-jar and generated fields;
-3. measures and seals that prepared representation after checking method, target, and `Host`;
-4. atomically reserves counters, bytes, timeout, and concurrency;
+3. measures and seals that prepared representation after checking method, target, `Host`, attempt
+   kind, effective risk, redirect depth, timeout, response allowance, arm, and round;
+4. derives the complete attempt cost from that capability and atomically reserves counters, bytes,
+   timeout, and concurrency;
 5. revalidates authorization and records `BUDGET_RESERVED` plus `ATTEMPT_STARTED`;
 6. recomputes the prepared digest, verifies the adapter seal and authorization fields, then sends
    the exact request object once;
@@ -23,6 +25,9 @@ For each network attempt MRMA:
 
 No reservation is created when a check fails. A lease cannot be committed twice. Unused response
 and timeout capacity is released. Active leases must be zero before final evidence is built.
+The ledger and transport adapter must use the same journal, and a lease with different attempt
+semantics is rejected before an attempt event or network call. A canonical digest also binds the
+ledger's complete limits to the budget policy in the accepted authorization manifest.
 
 ## Byte accounting
 

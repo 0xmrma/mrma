@@ -12,29 +12,41 @@ redirects, observations, cancellation, failure, and completion. Verification rej
 JSON keys, non-finite numbers, malformed digests, sequence gaps, reorder, truncation, tampering, and
 unknown event types.
 
-## Experiment v8
+## Experiment v9
 
-`mrma.experiment/v8` is strict Draft 2020-12 JSON Schema with nested
+`mrma.experiment/v9` is strict Draft 2020-12 JSON Schema with nested
 `additionalProperties: false`. It includes run state, authorization summary, plan, budget, journal,
 transport/runtime provenance, comparison resource outcomes, charset resolution, observations,
 analysis, exploration/confirmation role, assurance dimensions, a complete privacy-safe effective
-plan, and structured limitations.
+plan, structured limitations, mutation-pair evidence, and repeated-control pair evidence.
 
 Cross-field constraints and verifier checks prevent decisive verdicts with incomplete sampling,
 research authorization bypass, insecure unacknowledged TLS, exact replay claims from semantic
 HTTP, false durable claims, false complete header coverage, and no-influence conclusions after
-comparison failure. Verification recomputes the v2 effective-plan digest from its canonical
-document. Published experiment schemas v2 through v8 are byte-locked by tests.
+comparison failure. Verification recomputes the v2 effective-plan digest, observation/pair
+topology, sampling completeness, changed and indeterminate counts, rates, Wilson intervals,
+similarity and effect summaries, outcome counts, control stability, and the fixed-sample verdict.
+Published experiment schemas v2 through v8 remain byte-locked; v9 is their immutable successor.
+
+Existing v7 and v8 documents remain schema- and integrity-verifiable. They do not publish the
+repeated-control pair classifications required to independently rederive control stability, so the
+verification result reports `statistical_derivation_verified: false` for those versions. The
+verifier does not infer unavailable evidence or silently upgrade a legacy conclusion.
+
+Statistical rederivation starts from the privacy-safe public pair classifications. It checks that
+their topology and every reported aggregate support the recorded conclusion; it does not rerun body
+comparison from credentials or unbounded raw responses that are deliberately absent from a public
+bundle.
 
 The evidence plan digest uses run-local fingerprints and is intended for bundle integrity, not
 cross-run approval. Dry-run output separately exposes a deterministic local approval-plan digest
 that binds exact request values, privacy mode, authorization digest, comparison policy, and selected
-transport policy. The approval digest is excluded from journals and shared v8 evidence.
+transport policy. The approval digest is excluded from journals and shared v9 evidence.
 
 ## Partial results
 
 Keyboard interruption, cancellation, authorization rejection, budget exhaustion, transport/policy
-failure, and incomplete transport sampling produce v8-valid partial evidence. Status, planned and
+failure, and incomplete transport sampling produce v9-valid partial evidence. Status, planned and
 completed rounds, stop reason, consumed budget, collected observations, limitations, and
 `INCONCLUSIVE` remain available. Complete sampling requires completed status, exact rounds, and the
 exact planned observation count.
@@ -45,7 +57,7 @@ Standard and strict evidence use per-run keyed fingerprints and reduced timing/t
 Forensic mode retains more exact metadata and requires deliberate use. Public evidence contains a
 summary and digest, not the executable authorization manifest. Raw credentials, proxy credentials,
 authorization tokens, environment values, mutation secrets, and local paths are forbidden by model
-and tests. Version 8 declares cross-run correlation as partial because authorization digests,
+and tests. Version 9 declares cross-run correlation as partial because authorization digests,
 original-source digests, and journal target, origin, address-set, and effective-authority
 identifiers are deterministic. Mutation-delta identifiers written to the journal are run-local
 HMAC fingerprints; the deterministic local delta digest remains inside the authorization and
@@ -56,9 +68,9 @@ transport capability boundary.
 An `mrma.evidence-bundle/v1` ZIP has deterministic entry order, timestamps, permissions, and
 serialization. It contains plan, result, authorization summary, journal, schema, runtime, packaged
 release benchmark, replay instructions, and a file-digest manifest. `mrma evidence verify` checks
-the ZIP file set, sizes/digests, schema compatibility, result/journal linkage, observation counts,
-benchmark schema, effective-plan digest, and equality between the result digest and every journal
-`RUN_PLANNED` event.
+the ZIP file set, sizes/digests, schema compatibility, result/journal linkage, observation topology,
+benchmark schema, effective-plan digest, statistical derivation, and equality between the result
+digest and every journal `RUN_PLANNED` event.
 
 The hash chain detects modification but does not authenticate who created an entirely new bundle.
 MRMA does not implement a home-grown signature scheme; organizational trust roots remain deferred.

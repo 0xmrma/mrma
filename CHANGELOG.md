@@ -3,6 +3,35 @@
 All notable changes are documented here. MRMA follows semantic versioning for the CLI and uses an
 independent version in each machine-readable evidence schema.
 
+## 0.4.5 - 2026-08-07
+
+### Attempt Invariant Closure
+
+- Derive reservations directly from the adapter-sealed prepared capability. Attempt kind,
+  effective risk, redirect depth, timeout, response allowance, arm, round, target, origin, body,
+  and prepared representation are checked before `ATTEMPT_STARTED`.
+- Reject evidence contexts whose role or round differs from the prepared attempt, and record depth
+  and effective risk in reservation events.
+- Require one shared journal for adapter-issued reservations and the central budget ledger.
+
+### Offline Conclusion Verification
+
+- Add strict `mrma.experiment/v9` evidence with public repeated-control pair classifications.
+- Recompute pair topology, sampling completeness, changed and indeterminate counts, rates, Wilson
+  intervals, similarity summaries, effect counts, outcome counts, control stability, and the final
+  fixed-sample verdict during offline verification.
+- Retain v7 and v8 schema verification without claiming statistical rederivation that their public
+  documents cannot support. New generation through legacy versioned builders remains disabled.
+
+### Target Resolution And Validation
+
+- Define `base_url` as an HTTP(S) origin only. Origin-form targets are root-relative and plans with
+  a path, query, fragment, or userinfo in the base fail before networking.
+- Expand the committed critical-policy mutation catalog from 39 to 49 cases, including lease
+  semantics, evidence context, verdict derivation, and origin-base enforcement.
+- Validate 369 tests with 71% whole-repository branch coverage, 94.26% aggregate critical-runtime
+  coverage, and 86.43% corrected-core coverage.
+
 ## 0.4.4 - 2026-08-07
 
 ### Prepared Request Boundary

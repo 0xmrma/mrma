@@ -5,13 +5,16 @@ import json
 import os
 import tempfile
 import zipfile
+from collections import Counter
 from importlib.resources import files
 from pathlib import Path, PurePosixPath
+from statistics import median
 from typing import cast
 
 from jsonschema import Draft202012Validator
 
 from mrma import __version__
+from mrma.core.experiment import HTTP_RESPONSE, wilson_interval
 from mrma.engine.plan import effective_plan_digest
 
 from .journal import EvidenceIntegrityError, verify_journal, verify_journal_bytes
@@ -68,6 +71,24 @@ def _as_object(value: object, *, label: str) -> dict[str, object]:
     return cast(dict[str, object], value)
 
 
+def _as_array(value: object, *, label: str) -> list[object]:
+    if not isinstance(value, list):
+        raise EvidenceIntegrityError("INVALID_EVIDENCE_JSON", f"{label} must be an array")
+    return cast(list[object], value)
+
+
+def _as_int(value: object, *, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise EvidenceIntegrityError("INVALID_EVIDENCE_JSON", f"{label} must be an integer")
+    return value
+
+
+def _as_float(value: object, *, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise EvidenceIntegrityError("INVALID_EVIDENCE_JSON", f"{label} must be a number")
+    return float(value)
+
+
 def _canonical_json(value: object) -> bytes:
     return (
         json.dumps(
@@ -86,7 +107,11 @@ def _digest(data: bytes) -> str:
 
 
 def _schema_bytes(schema_version: str) -> bytes:
-    if schema_version not in {"mrma.experiment/v7", "mrma.experiment/v8"}:
+    if schema_version not in {
+        "mrma.experiment/v7",
+        "mrma.experiment/v8",
+        "mrma.experiment/v9",
+    }:
         raise EvidenceIntegrityError("UNSUPPORTED_EVIDENCE_SCHEMA", schema_version)
     version = schema_version.rsplit("/v", 1)[1]
     return files("mrma.schemas").joinpath(f"experiment-v{version}.schema.json").read_bytes()
@@ -125,6 +150,280 @@ def _release_benchmark() -> dict[str, object]:
     return _load_json(data, label="installed release benchmark")
 
 
+def _derivation_mismatch(label: str) -> EvidenceIntegrityError:
+    return EvidenceIntegrityError(
+        "STATISTICAL_DERIVATION_MISMATCH",
+        f"recorded {label} differs from public evidence derivation",
+    )
+
+
+def _expect_derived(actual: object, expected: object, *, label: str) -> None:
+    if actual != expected:
+        raise _derivation_mismatch(label)
+
+
+def _pair_objects(value: object, *, label: str) -> list[dict[str, object]]:
+    return [
+        _as_object(item, label=f"{label}[{index}]")
+        for index, item in enumerate(_as_array(value, label=label))
+    ]
+
+
+def _rounded_interval(changed: int, total: int) -> list[float]:
+    low, high = wilson_interval(changed, total)
+    return [round(low, 6), round(high, 6)]
+
+
+def _similarity_median(pairs: list[dict[str, object]]) -> float | None:
+    values = [
+        _as_float(item["similarity"], label="pair similarity")
+        for item in pairs
+        if item["similarity"] is not None
+    ]
+    return round(float(median(values)), 6) if values else None
+
+
+def _verify_v9_statistical_derivation(
+    document: dict[str, object],
+) -> dict[str, object]:
+    run = _as_object(document["run"], label="run")
+    plan = _as_object(document["plan"], label="plan")
+    effective_plan = _as_object(plan["effective_plan"], label="plan.effective_plan")
+    experiment = _as_object(effective_plan["experiment"], label="effective experiment")
+    analysis = _as_object(document["analysis"], label="analysis")
+    reproducibility = _as_object(analysis["reproducibility"], label="reproducibility")
+    control_stability = _as_object(analysis["control_stability"], label="control_stability")
+    effect = _as_object(analysis["effect"], label="effect")
+    mutation_pairs = _pair_objects(analysis["round_evidence"], label="round_evidence")
+    control_pairs = _pair_objects(analysis["control_evidence"], label="control_evidence")
+    observations = _pair_objects(analysis["observations"], label="observations")
+
+    observation_keys: set[tuple[int, str]] = set()
+    observations_by_arm: dict[str, dict[int, dict[str, object]]] = {}
+    for item in observations:
+        arm = str(item["arm"])
+        round_index = _as_int(item["round"], label="observation round")
+        key = (round_index, arm)
+        if key in observation_keys:
+            raise _derivation_mismatch("observation arm/round uniqueness")
+        observation_keys.add(key)
+        observations_by_arm.setdefault(arm, {})[round_index] = item
+
+    mutation_rounds = [
+        _as_int(item["round"], label="mutation pair round") for item in mutation_pairs
+    ]
+    control_rounds = [
+        _as_int(item["round"], label="control pair round") for item in control_pairs
+    ]
+    if len(set(mutation_rounds)) != len(mutation_rounds):
+        raise _derivation_mismatch("mutation pair round uniqueness")
+    if len(set(control_rounds)) != len(control_rounds):
+        raise _derivation_mismatch("control pair round uniqueness")
+
+    schedule_mode = str(experiment["schedule_mode"])
+    mutations = observations_by_arm.get("mutation", {})
+    if schedule_mode == "bracketed":
+        controls_before = observations_by_arm.get("control_before", {})
+        controls_after = observations_by_arm.get("control_after", {})
+        paired_rounds = set(controls_before) & set(controls_after) & set(mutations)
+        expected_control_rounds = paired_rounds
+        missing_pairs = not (
+            len(controls_before)
+            == len(controls_after)
+            == len(mutations)
+            == len(paired_rounds)
+        )
+        control_observations = [*controls_before.values(), *controls_after.values()]
+        observations_per_round = 3
+    else:
+        controls = observations_by_arm.get("control", {})
+        paired_rounds = set(controls) & set(mutations)
+        ordered_controls = sorted(
+            controls.values(),
+            key=lambda item: _as_int(item["sequence"], label="observation sequence"),
+        )
+        expected_control_rounds = {
+            _as_int(item["round"], label="control round") for item in ordered_controls[1:]
+        }
+        missing_pairs = len(controls) != len(mutations) or len(paired_rounds) != len(controls)
+        control_observations = list(controls.values())
+        observations_per_round = 2
+
+    if set(mutation_rounds) != paired_rounds or set(control_rounds) != expected_control_rounds:
+        raise _derivation_mismatch("pair topology")
+
+    maximum_rounds = _as_int(experiment["maximum_rounds"], label="maximum rounds")
+    _expect_derived(run["planned_rounds"], maximum_rounds, label="planned rounds")
+    _expect_derived(plan["maximum_rounds"], maximum_rounds, label="plan maximum rounds")
+    _expect_derived(
+        plan["observations_per_round"],
+        observations_per_round,
+        label="observations per round",
+    )
+    _expect_derived(
+        plan["maximum_logical_observations"],
+        maximum_rounds * observations_per_round,
+        label="maximum logical observations",
+    )
+    _expect_derived(run["completed_rounds"], len(paired_rounds), label="completed rounds")
+    complete_sampling = (
+        run["status"] == "completed"
+        and len(paired_rounds) == maximum_rounds
+        and len(observations) == maximum_rounds * observations_per_round
+    )
+    _expect_derived(run["complete_sampling"], complete_sampling, label="sampling completeness")
+
+    mutation_changed = sum(item["classification"] == "CHANGED" for item in mutation_pairs)
+    mutation_indeterminate = sum(
+        item["classification"] == "INDETERMINATE" for item in mutation_pairs
+    )
+    control_changed = sum(item["classification"] == "CHANGED" for item in control_pairs)
+    control_indeterminate = sum(
+        item["classification"] == "INDETERMINATE" for item in control_pairs
+    )
+    mutation_rate = round(mutation_changed / len(mutation_pairs), 6) if mutation_pairs else 0.0
+    control_rate = round(control_changed / len(control_pairs), 6) if control_pairs else 0.0
+    mutation_interval = _rounded_interval(mutation_changed, len(mutation_pairs))
+    control_interval = _rounded_interval(control_changed, len(control_pairs))
+
+    for actual, expected, label in (
+        (reproducibility["changed_rounds"], mutation_changed, "mutation changed rounds"),
+        (
+            reproducibility["indeterminate_rounds"],
+            mutation_indeterminate,
+            "mutation indeterminate rounds",
+        ),
+        (reproducibility["rate"], mutation_rate, "mutation rate"),
+        (
+            reproducibility["wilson_interval_95"],
+            mutation_interval,
+            "mutation Wilson interval",
+        ),
+        (control_stability["changed_comparisons"], control_changed, "control changes"),
+        (
+            control_stability["indeterminate_comparisons"],
+            control_indeterminate,
+            "control indeterminate comparisons",
+        ),
+        (control_stability["rate"], control_rate, "control rate"),
+        (
+            control_stability["wilson_interval_95"],
+            control_interval,
+            "control Wilson interval",
+        ),
+    ):
+        _expect_derived(actual, expected, label=label)
+
+    mutation_median = _similarity_median(mutation_pairs)
+    control_median = _similarity_median(control_pairs)
+    similarity_contrast = (
+        round(control_median - mutation_median, 6)
+        if control_median is not None and mutation_median is not None
+        else None
+    )
+    _expect_derived(
+        control_stability["median_similarity"],
+        control_median,
+        label="control median similarity",
+    )
+    for field, pair_field in (
+        ("status_shift_rounds", "status_changed"),
+        ("outcome_shift_rounds", "outcome_changed"),
+        ("redirect_shift_rounds", "redirect_changed"),
+        ("retry_shift_rounds", "retry_changed"),
+    ):
+        _expect_derived(
+            effect[field],
+            sum(bool(item[pair_field]) for item in mutation_pairs),
+            label=field,
+        )
+    _expect_derived(
+        effect["mutation_median_similarity"],
+        mutation_median,
+        label="mutation median similarity",
+    )
+    _expect_derived(
+        effect["control_minus_mutation_similarity"],
+        similarity_contrast,
+        label="similarity contrast",
+    )
+
+    header_counts: Counter[str] = Counter()
+    for item in mutation_pairs:
+        fields = [str(name) for name in _as_array(
+            item["response_header_differences"],
+            label="response_header_differences",
+        )]
+        if len(fields) != len(set(fields)):
+            raise _derivation_mismatch("response header difference uniqueness")
+        header_counts.update(fields)
+    expected_header_shifts = [
+        {"name": name, "rounds": count} for name, count in sorted(header_counts.items())
+    ]
+    _expect_derived(
+        effect["response_header_shifts"],
+        expected_header_shifts,
+        label="response header shift counts",
+    )
+
+    outcome_counts = Counter(str(item["outcome"]) for item in observations)
+    expected_outcome_counts = [
+        {"outcome": outcome, "count": count}
+        for outcome, count in sorted(outcome_counts.items())
+    ]
+    _expect_derived(
+        effect["outcome_counts"],
+        expected_outcome_counts,
+        label="outcome counts",
+    )
+
+    invalid_controls = any(item["outcome"] != HTTP_RESPONSE for item in control_observations)
+    control_confidently_stable = (
+        bool(control_pairs)
+        and not invalid_controls
+        and control_indeterminate == 0
+        and control_interval[1]
+        <= _as_float(
+            experiment["maximum_control_change_rate"],
+            label="maximum control change rate",
+        )
+    )
+    control_confidently_unstable = bool(control_pairs) and control_interval[0] > _as_float(
+        experiment["maximum_control_change_rate"],
+        label="maximum control change rate",
+    )
+    if missing_pairs or invalid_controls or control_confidently_unstable:
+        derived_verdict = "INCONCLUSIVE"
+    elif control_confidently_stable and mutation_interval[0] >= _as_float(
+        experiment["minimum_reproducibility"], label="minimum reproducibility"
+    ):
+        derived_verdict = "INFLUENCE_DETECTED"
+    elif (
+        control_confidently_stable
+        and mutation_indeterminate == 0
+        and mutation_interval[1]
+        <= _as_float(
+            experiment["no_influence_threshold"], label="no influence threshold"
+        )
+    ):
+        derived_verdict = "NO_INFLUENCE_OBSERVED"
+    else:
+        derived_verdict = "INCONCLUSIVE"
+    if run["status"] != "completed":
+        derived_verdict = "INCONCLUSIVE"
+    if run["verdict"] != derived_verdict or analysis["verdict"] != derived_verdict:
+        raise EvidenceIntegrityError(
+            "VERDICT_DERIVATION_MISMATCH",
+            "recorded verdict differs from the public evidence and effective plan",
+        )
+    return {
+        "statistical_derivation_verified": True,
+        "derived_verdict": derived_verdict,
+        "mutation_pairs": len(mutation_pairs),
+        "control_comparisons": len(control_pairs),
+    }
+
+
 def validate_result_document(document: dict[str, object]) -> dict[str, object]:
     schema_version = document.get("schema_version")
     if not isinstance(schema_version, str):
@@ -142,7 +441,7 @@ def validate_result_document(document: dict[str, object]) -> dict[str, object]:
     consumed = _as_object(budget["consumed"], label="budget.consumed")
     transport = _as_object(document["transport"], label="transport")
     plan = _as_object(document["plan"], label="plan")
-    if schema_version == "mrma.experiment/v8":
+    if schema_version in {"mrma.experiment/v8", "mrma.experiment/v9"}:
         effective_plan = _as_object(plan["effective_plan"], label="plan.effective_plan")
         if plan["plan_digest"] != effective_plan_digest(effective_plan):
             raise EvidenceIntegrityError(
@@ -178,11 +477,17 @@ def validate_result_document(document: dict[str, object]) -> dict[str, object]:
             "EVIDENCE_CROSS_FIELD_INVALID",
             "decisive evidence does not contain the complete fixed sample",
         )
+    derivation = (
+        _verify_v9_statistical_derivation(document)
+        if schema_version == "mrma.experiment/v9"
+        else {"statistical_derivation_verified": False}
+    )
     return {
         "schema_version": schema_version,
         "schema_valid": True,
         "run_id": run["id"],
         "verdict": run["verdict"],
+        **derivation,
     }
 
 

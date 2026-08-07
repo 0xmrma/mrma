@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from mrma.engine.oracle import OracleRunResult
     from mrma.engine.plan import ExperimentPlan
 
-EXPERIMENT_SCHEMA_VERSION = "mrma.experiment/v8"
+EXPERIMENT_SCHEMA_VERSION = "mrma.experiment/v9"
 
 
 def _package_version(name: str) -> str | None:
@@ -184,7 +184,7 @@ def _pair(item: PairEvidence, redactor: EvidenceRedactor) -> dict[str, object]:
     }
 
 
-def build_experiment_v8(
+def build_experiment_v9(
     result: OracleRunResult,
     *,
     plan: ExperimentPlan,
@@ -408,6 +408,7 @@ def build_experiment_v8(
             "reasons": list(analysis.reasons),
             "observations": [_observation(item, redactor) for item in analysis.observations],
             "round_evidence": [_pair(item, redactor) for item in analysis.pairs],
+            "control_evidence": [_pair(item, redactor) for item in analysis.control_pairs],
         },
         "response_header_coverage": {
             "mode": result.header_coverage.mode,
@@ -456,6 +457,14 @@ def build_experiment_v8(
     }
 
 
+def build_experiment_v8(*args: object, **kwargs: object) -> dict[str, object]:
+    """Reject new v8 generation while retaining verification compatibility."""
+    del args, kwargs
+    raise ValueError(
+        "new mrma.experiment/v8 generation is disabled; use build_experiment_v9"
+    )
+
+
 def build_experiment_v7(
     result: OracleRunResult,
     *,
@@ -491,5 +500,5 @@ def build_experiment_v7(
         insecure_exception,
     )
     raise ValueError(
-        "new mrma.experiment/v7 generation is disabled; use build_experiment_v8"
+        "new mrma.experiment/v7 generation is disabled; use build_experiment_v9"
     )

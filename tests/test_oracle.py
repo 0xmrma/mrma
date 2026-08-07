@@ -21,7 +21,7 @@ from mrma.core.sender import SendPolicy
 from mrma.engine import ExperimentOracle, ExperimentPlan
 from mrma.engine.oracle import _redirect_request
 from mrma.evidence import EvidenceIntegrityError, EvidenceJournal, validate_result_document
-from mrma.evidence.models import build_experiment_v7, build_experiment_v8
+from mrma.evidence.models import build_experiment_v7, build_experiment_v8, build_experiment_v9
 from mrma.policy.authorization import ManifestAuthorizationPolicy, load_authorization_manifest
 from mrma.policy.budget import BudgetLedger, BudgetLimits
 from mrma.policy.comparison import ComparisonPolicy
@@ -106,9 +106,9 @@ def plan(
     )
 
 
-def v8_document(oracle, journal, experiment_plan, result):
+def v9_document(oracle, journal, experiment_plan, result):
     journal.close()
-    return build_experiment_v8(
+    return build_experiment_v9(
         result,
         plan=experiment_plan,
         authorization=oracle.authorization,
@@ -301,7 +301,7 @@ def test_dry_run_authorizes_without_network_or_budget_consumption(
     assert [event.event_type for event in journal.events].count("ATTEMPT_STARTED") == 0
 
 
-def test_v8_evidence_is_strict_and_schema_valid(
+def test_v9_evidence_is_strict_and_schema_valid(
     authorization_payload,
     write_authorization,
     monkeypatch,
@@ -318,8 +318,8 @@ def test_v8_evidence_is_strict_and_schema_valid(
     )
     experiment_plan = plan(follow_redirects=False)
     result = oracle.run(experiment_plan)
-    document = v8_document(oracle, journal, experiment_plan, result)
-    schema = json.loads(Path("mrma/schemas/experiment-v8.schema.json").read_text())
+    document = v9_document(oracle, journal, experiment_plan, result)
+    schema = json.loads(Path("mrma/schemas/experiment-v9.schema.json").read_text())
     Draft202012Validator.check_schema(schema)
     Draft202012Validator(schema).validate(document)
     assert document["authorization"]["bypass"] is False
@@ -346,13 +346,17 @@ def test_v8_evidence_is_strict_and_schema_valid(
         item["code"] == "CROSS_RUN_POLICY_LINKABILITY"
         for item in document["limitations"]
     )
+    assert document["analysis"]["control_evidence"]
+    verification = validate_result_document(document)
+    assert verification["statistical_derivation_verified"] is True
+    assert verification["derived_verdict"] == result.verdict
 
     invalid = deepcopy(document)
     invalid["privacy"]["fingerprint_policy"]["cross_run_correlation"] = False
     assert list(Draft202012Validator(schema).iter_errors(invalid))
 
 
-def test_partial_outcomes_are_valid_v8_evidence(
+def test_partial_outcomes_are_valid_v9_evidence(
     authorization_payload,
     write_authorization,
     monkeypatch,
@@ -388,7 +392,7 @@ def test_partial_outcomes_are_valid_v8_evidence(
                 )
         experiment_plan = plan(follow_redirects=False)
         result = oracle.run(experiment_plan, cancellation=cancellation)
-        document = v8_document(oracle, journal, experiment_plan, result)
+        document = v9_document(oracle, journal, experiment_plan, result)
 
         statuses.append(result.status)
         assert result.verdict == "INCONCLUSIVE"
@@ -572,6 +576,20 @@ def test_plan_digest_binds_effective_request_and_decision_policy():
     ).plan_digest != digest
 
 
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://example.test/api",
+        "http://example.test?tenant=one",
+        "http://example.test#fragment",
+        "http://user@example.test",
+    ],
+)
+def test_experiment_plan_requires_an_origin_only_base_url(base_url: str):
+    with pytest.raises(ValueError, match="base_url"):
+        replace(plan(), base_url=base_url)
+
+
 def test_private_approval_digest_is_stable_across_run_redactors():
     first = plan(follow_redirects=False)
     second = replace(
@@ -615,14 +633,66 @@ def test_result_verifier_recomputes_effective_plan_digest(
     )
     experiment_plan = plan(follow_redirects=False)
     result = oracle.run(experiment_plan)
-    document = v8_document(oracle, journal, experiment_plan, result)
+    document = v9_document(oracle, journal, experiment_plan, result)
     document["plan"]["effective_plan"]["send"]["retries"] = 99
 
     with pytest.raises(EvidenceIntegrityError, match="PLAN_DIGEST_MISMATCH"):
         validate_result_document(document)
 
 
-def test_versioned_v7_builder_rejects_new_generation(
+def test_result_verifier_rederives_v9_statistics_and_verdict(
+    authorization_payload,
+    write_authorization,
+    monkeypatch,
+):
+    oracle, journal = build_oracle(
+        authorization_payload,
+        write_authorization,
+        monkeypatch,
+        lambda _request: httpx.Response(200, content=b"stable"),
+    )
+    experiment_plan = plan(follow_redirects=False)
+    result = oracle.run(experiment_plan)
+    document = v9_document(oracle, journal, experiment_plan, result)
+
+    altered_verdict = deepcopy(document)
+    altered_verdict["run"]["verdict"] = "NO_INFLUENCE_OBSERVED"
+    altered_verdict["analysis"]["verdict"] = "NO_INFLUENCE_OBSERVED"
+    with pytest.raises(EvidenceIntegrityError, match="VERDICT_DERIVATION_MISMATCH"):
+        validate_result_document(altered_verdict)
+
+    altered_count = deepcopy(document)
+    altered_count["analysis"]["reproducibility"]["changed_rounds"] += 1
+    with pytest.raises(EvidenceIntegrityError, match="STATISTICAL_DERIVATION_MISMATCH"):
+        validate_result_document(altered_count)
+
+    altered_interval = deepcopy(document)
+    altered_interval["analysis"]["control_stability"]["wilson_interval_95"] = [
+        0.0,
+        0.5,
+    ]
+    with pytest.raises(EvidenceIntegrityError, match="STATISTICAL_DERIVATION_MISMATCH"):
+        validate_result_document(altered_interval)
+
+    altered_control = deepcopy(document)
+    altered_control["analysis"]["control_evidence"][0]["classification"] = "CHANGED"
+    with pytest.raises(EvidenceIntegrityError, match="STATISTICAL_DERIVATION_MISMATCH"):
+        validate_result_document(altered_control)
+
+    altered_effect = deepcopy(document)
+    altered_effect["analysis"]["effect"]["status_shift_rounds"] += 1
+    with pytest.raises(EvidenceIntegrityError, match="STATISTICAL_DERIVATION_MISMATCH"):
+        validate_result_document(altered_effect)
+
+    altered_topology = deepcopy(document)
+    altered_topology["analysis"]["round_evidence"][1]["round"] = altered_topology[
+        "analysis"
+    ]["round_evidence"][0]["round"]
+    with pytest.raises(EvidenceIntegrityError, match="STATISTICAL_DERIVATION_MISMATCH"):
+        validate_result_document(altered_topology)
+
+
+def test_versioned_builders_reject_legacy_generation_and_verify_legacy_documents(
     authorization_payload,
     write_authorization,
     monkeypatch,
@@ -658,7 +728,24 @@ def test_versioned_v7_builder_rejects_new_generation(
             },
         )
 
-    legacy = v8_document(oracle, journal, experiment_plan, result)
+    with pytest.raises(ValueError, match="v8 generation is disabled"):
+        build_experiment_v8(
+            result,
+            plan=experiment_plan,
+            authorization=oracle.authorization,
+            budgets=oracle.budgets,
+            journal=journal,
+        )
+
+    current = v9_document(oracle, journal, experiment_plan, result)
+    legacy_v8 = deepcopy(current)
+    legacy_v8["schema_version"] = "mrma.experiment/v8"
+    legacy_v8["analysis"].pop("control_evidence")
+    verification = validate_result_document(legacy_v8)
+    assert verification["schema_valid"] is True
+    assert verification["statistical_derivation_verified"] is False
+
+    legacy = deepcopy(legacy_v8)
     legacy["schema_version"] = "mrma.experiment/v7"
     for field_name in (
         "authority_mode",
@@ -696,6 +783,22 @@ def test_oracle_components_must_share_one_journal(
             transport=oracle.transport,
             comparison=ComparisonPolicy(EquivalenceConfig()),
             evidence=EvidenceJournal(run_id="other"),
+        )
+
+    mismatched_ledger = BudgetLedger(
+        replace(
+            oracle.budgets.limits,
+            total_network_attempts=oracle.budgets.limits.total_network_attempts + 1,
+        ),
+        oracle.evidence,
+    )
+    with pytest.raises(ValueError, match="budget limits must match"):
+        ExperimentOracle(
+            authorization=oracle.authorization,
+            budgets=mismatched_ledger,
+            transport=oracle.transport,
+            comparison=ComparisonPolicy(EquivalenceConfig()),
+            evidence=oracle.evidence,
         )
 
 

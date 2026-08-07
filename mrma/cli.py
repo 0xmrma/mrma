@@ -54,7 +54,7 @@ from .evidence import (
     create_evidence_bundle,
     verify_evidence,
 )
-from .evidence.models import build_experiment_v8
+from .evidence.models import build_experiment_v9
 from .policy.authorization import (
     AuthorizationError,
     ManifestAuthorizationPolicy,
@@ -1222,7 +1222,7 @@ def cmd_experiment(args: argparse.Namespace) -> int:
     completed_at = utc_now_iso()
     target_metadata = _redacted_target_metadata(base_url, baseline, redactor)
     result_payload = result.to_dict()
-    payload = build_experiment_v8(
+    payload = build_experiment_v9(
         oracle_result,
         plan=plan,
         authorization=authorization,
@@ -1339,7 +1339,7 @@ def cmd_experiment(args: argparse.Namespace) -> int:
         f"[muted]Stop: {result.stop_reason}  |  state: {args.state_mode}  |  "
         f"{schedule_detail}[/muted]"
     )
-    console.print(f"[muted]Run {run_id[:12]}  |  mrma.experiment/v8  |  {duration_ms:.0f} ms[/muted]")
+    console.print(f"[muted]Run {run_id[:12]}  |  mrma.experiment/v9  |  {duration_ms:.0f} ms[/muted]")
     return exit_code
 
 

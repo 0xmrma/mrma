@@ -2,7 +2,7 @@
 
 ## Exact claim
 
-MRMA v0.4.4 is an authorization-enforcing, budgeted, recoverable HTTP trust-influence
+MRMA v0.4.5 is an authorization-enforcing, budgeted, recoverable HTTP trust-influence
 tool. It uses semantic HTTP replay and fixed-sample differential experiments.
 
 ## Non-claims
@@ -41,8 +41,8 @@ mrma evidence verify run.zip --json
 ```
 
 Bundle verification checks digests, file set, schema, journal chain, result linkage, effective-plan
-digest, `RUN_PLANNED` binding, observation count, and packaged benchmark. It does not authenticate
-the bundle author.
+digest, `RUN_PLANNED` binding, observation topology, aggregate statistics, confidence intervals,
+the derived verdict, and the packaged benchmark. It does not authenticate the bundle author.
 
 ## Benchmark procedure
 
@@ -72,7 +72,7 @@ may vary; conclusions must all pass. See [BENCHMARKS.md](BENCHMARKS.md).
 3. Are the fixed-sample verdict rules and control-instability handling defensible?
 4. Can semantic equivalence create meaningful false positives or false negatives for the documented
    media/header registry?
-5. Do v8 and bundle cross-field checks prevent overclaiming on partial/resource-limited runs?
+5. Do v9 derivation and bundle checks reject altered topology, aggregates, intervals, and verdicts?
 6. Does standard/strict evidence leak target secrets, credentials, paths, environment values, or
    executable policy data?
 7. Are the stated transport and integrity limitations complete and understandable?

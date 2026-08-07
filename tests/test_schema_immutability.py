@@ -89,9 +89,14 @@ def test_authorization_v1_is_byte_and_semantically_immutable():
             "f4fd01242049d77e63256c9f21ac88eb6f81366146f22ba118a0186b6fb40c5b",
             "b06a1ea651142b0428f03be60c7e3dfa4e50e965a5e0f7c4e4ee52b1eaf1268f",
         ),
+        (
+            "mrma/schemas/experiment-v9.schema.json",
+            "0df4da87d92c8a51e28276451af7ad71644b07a56261e81fbc9ac5d31c918363",
+            "4d088c206d35e554136a527e92593909424ef513aa211ab96a4aa96908d575a1",
+        ),
     ],
 )
-def test_v041_public_schemas_are_byte_and_semantically_immutable(
+def test_published_public_schemas_are_byte_and_semantically_immutable(
     path: str,
     raw_expected: str,
     canonical_expected: str,

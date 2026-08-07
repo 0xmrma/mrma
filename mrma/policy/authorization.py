@@ -11,9 +11,9 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
-from mrma.core.http_semantics import canonical_uri
+from mrma.core.http_semantics import canonical_uri, origin_base_url, semantic_request_url
 from mrma.core.raw_request import RawRequest
 
 from .budget import BudgetError, BudgetLimits
@@ -23,7 +23,7 @@ AUTHORIZATION_SCHEMA_VERSION = "mrma.authorization/v2"
 SUPPORTED_AUTHORIZATION_SCHEMAS = frozenset(
     {"mrma.authorization/v1", AUTHORIZATION_SCHEMA_VERSION}
 )
-AUTHORIZATION_POLICY_VERSION = "authorization-policy/2.1"
+AUTHORIZATION_POLICY_VERSION = "authorization-policy/2.2"
 
 Resolver = Callable[[str, int], Sequence[str]]
 _HTTP_METHOD = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
@@ -315,6 +315,8 @@ class AuthorizationDecision:
     canonical_origin: str = field(repr=False)
     method: str
     attempt_kind: str
+    effective_risk: str
+    budget_policy_digest: str
 
 
 @dataclass(frozen=True)
@@ -933,16 +935,21 @@ def _target_url(request: RawRequest, base_url: str) -> str:
             "AMBIGUOUS_TARGET_ENCODING",
             "request targets cannot contain spaces or control characters",
         )
-    if request.target_form == "absolute":
-        raw = request.path
-    elif request.target_form == "origin":
-        raw = urljoin(base_url.rstrip("/") + "/", request.path.lstrip("/"))
-    else:
+    if request.target_form not in {"absolute", "origin"}:
         raise AuthorizationError(
             "UNSUPPORTED_SEMANTIC_TARGET_FORM",
             f"{request.target_form}-form cannot be sent by semantic-http transport",
         )
+    if request.target_form == "origin":
+        try:
+            origin_base_url(base_url)
+        except ValueError as exc:
+            raise AuthorizationError(
+                "INVALID_BASE_URL",
+                "origin-form requests require an HTTP(S) origin without a path, query, or fragment",
+            ) from exc
     try:
+        raw = semantic_request_url(base_url, request.path, request.target_form)
         parts = urlsplit(raw)
         _validate_unambiguous_target(parts)
         if parts.username is not None or parts.password is not None:
@@ -1518,6 +1525,10 @@ class ManifestAuthorizationPolicy:
             canonical_origin=origin,
             method=method,
             attempt_kind=attempt_kind,
+            effective_risk=effective_risk,
+            budget_policy_digest=BudgetLimits.from_mapping(
+                self.manifest.budget
+            ).policy_digest,
         )
         return AuthorizedRequestContext(
             decision=decision,

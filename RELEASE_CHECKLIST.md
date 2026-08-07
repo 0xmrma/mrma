@@ -1,11 +1,11 @@
-# MRMA v0.4.3 release checklist
+# MRMA v0.4.5 release checklist
 
 ## Correctness and security
 
 - [ ] Every network command is covered by the architectural policy-boundary test.
 - [ ] Authorization, budget, redirect, retry, hook, journal, privacy, and partial-result adversarial tests pass.
-- [ ] `mrma.experiment/v8`, authorization v2, benchmark v2, and all negative fixtures validate.
-- [ ] Experiment schemas v2-v8, authorization v1-v2, and benchmark v1-v2 match immutable SHA-256 fixtures.
+- [ ] `mrma.experiment/v9`, authorization v2, benchmark v2, and all negative fixtures validate.
+- [ ] Experiment schemas v2-v9, authorization v1-v2, and benchmark v1-v2 match immutable SHA-256 fixtures.
 - [ ] The 22-case loopback benchmark passes with zero false positives/negatives.
 - [ ] Critical semantic mutation gate kills every committed mutant.
 - [ ] No unresolved P0/P1 correctness, authorization, evidence, or secret-exposure issue remains.
@@ -24,10 +24,10 @@
 
 ## Distribution and container
 
-- [ ] Version is `0.4.3` in package metadata, import, CLI, wheel, and container.
+- [ ] Version is `0.4.5` in package metadata, import, CLI, wheel, and container.
 - [ ] Wheel and sdist build from a clean tree and pass `twine check`.
 - [ ] Clean wheel install passes `pip check` outside the source tree.
-- [ ] Clean wheel contains experiment v2-v8, authorization v1-v2, benchmark v1-v2, and release baseline.
+- [ ] Clean wheel contains experiment v2-v9, authorization v1-v2, benchmark v1-v2, and release baseline.
 - [ ] Non-root container builds from digest-pinned base and hash-locked dependencies.
 - [ ] Container smoke, local authorized experiment, bundle creation, and offline verification pass.
 - [ ] Multi-architecture OCI publication includes provenance and SBOM; final digest is recorded.
